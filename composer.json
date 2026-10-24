@@ -1,0 +1,49 @@
+{
+    "name": "panda-men/think-queue-stream",
+    "description": "Redis Streams task queue for ThinkPHP 8 and PHP 8.2+",
+    "type": "library",
+    "license": "Apache-2.0",
+    "require": {
+        "php": "^8.2",
+        "ext-redis": ">=6.0",
+        "topthink/framework": "^8.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "ThinkQueue\\Streams\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "ThinkQueue\\Streams\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "think": {
+            "services": [
+                "ThinkQueue\\Streams\\Service"
+            ],
+            "config": {
+                "queue_streams": "config/queue_streams.php"
+            }
+        }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "lint": "find src config tests -name '*.php' -exec php -l {} \\;"
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "homepage": "https://github.com/panda-men/think-queue-stream",
+    "support": {
+        "issues": "https://github.com/panda-men/think-queue-stream/issues",
+        "source": "https://github.com/panda-men/think-queue-stream"
+    },
+    "suggest": {
+        "ext-pcntl": "Required by queue:work to enforce task execution timeouts"
+    }
+}

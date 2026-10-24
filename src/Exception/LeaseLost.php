@@ -1,0 +1,8 @@
+<?php
+declare(strict_types=1);
+
+namespace ThinkQueue\Streams\Exception;
+
+final class LeaseLost extends \RuntimeException
+{
+}
