@@ -20,7 +20,7 @@ final class Monitor
         'failed' => '最终失败', 'lease_lost' => '处理权丢失', 'timed_out' => '执行超时',
         'error' => '异常', 'stopped' => '退出', 'dispatch' => '邮件调度', 'dispatch_deferred' => '调度推迟'];
     private const FIELDS = ['consumer', 'job_id', 'message_id', 'job', 'attempt', 'max_tries', 'elapsed_ms',
-        'delay_seconds', 'timeout_seconds', 'exception', 'reason', 'queued', 'deferred', 'skipped',
+        'retry_number', 'max_retries', 'delay_seconds', 'timeout_seconds', 'exception', 'reason', 'queued', 'deferred', 'skipped',
         'failed', 'claimed', 'succeeded', 'released', 'retried', 'lease_lost', 'timed_out', 'errors'];
 
     /**
@@ -89,7 +89,17 @@ final class Monitor
         if (array_key_exists($counter, $this->counts)) $this->counts[$counter]++;
         // 静默只影响输出；实际领取与处理结果仍进入进程统计。
         if ($this->isSilent($event, $context)) return;
-        $line = '[' . (new DateTimeImmutable())->format('Y-m-d H:i:s.vP') . '][' . self::LABELS[$event] . ']';
+        $label = self::LABELS[$event];
+        $attempt = $context['attempt'] ?? null;
+        $maxTries = $context['max_tries'] ?? null;
+        if ($event === 'retried' && is_int($attempt) && is_int($maxTries) && $attempt >= 1 && $attempt < $maxTries) {
+            // 此事件发生在本次失败并已重投之后，attempt 对应即将安排的重试序号。
+            // 最大领取次数包含首次执行，所以可用的重试次数比 max_tries 少一次。
+            $context['retry_number'] = $attempt;
+            $context['max_retries'] = $maxTries - 1;
+            $label .= ' 第' . $attempt . '次/最多' . ($maxTries - 1) . '次';
+        }
+        $line = '[' . (new DateTimeImmutable())->format('Y-m-d H:i:s.vP') . '][' . $label . ']';
         $values = ['queue' => $queue, 'pid' => getmypid()] + array_intersect_key($context, array_flip(self::FIELDS));
         foreach ($values as $key => $value) {
             if (!is_scalar($value)) continue;
