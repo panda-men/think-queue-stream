@@ -2,6 +2,8 @@
 declare(strict_types=1);
 
 return [
+    // 日志通道；null 使用应用默认日志。常驻进程建议指定 realtime_write=true 的独立通道。
+    'log_channel' => null,
     // Redis 服务器地址。使用队列专用连接，不复用启用了序列化或客户端键前缀的缓存连接。
     'host' => '127.0.0.1',
     // Redis TCP 端口。

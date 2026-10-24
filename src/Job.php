@@ -14,6 +14,7 @@ final class Job
     private bool $deleted = false;
     private bool $released = false;
     private bool $failed = false;
+    private ?int $releaseDelay = null;
     private ?object $handler = null;
 
     /**
@@ -101,6 +102,7 @@ final class Job
             throw new LeaseLost('任务已经被其他消费者接管或完成。');
         }
         $this->released = true;
+        $this->releaseDelay = $delay;
     }
 
     /**
@@ -190,6 +192,15 @@ final class Job
     public function hasFailed(): bool
     {
         return $this->failed;
+    }
+
+    /**
+     * 获取本次重投的实际等待时间。
+     * @return int|null 延迟秒数，尚未重投时为 null
+     */
+    public function releaseDelay(): ?int
+    {
+        return $this->releaseDelay;
     }
 
     /**

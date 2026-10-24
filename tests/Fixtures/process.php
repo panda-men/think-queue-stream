@@ -143,6 +143,11 @@ if ($argv[1] === 'claim') {
     echo $job?->getJobId() . "\n";
     flush();
     sleep(10);
+} elseif ($argv[1] === 'logged-timeout') {
+    $monitor = new \ThinkQueue\Streams\Monitor();
+    $monitor->setOutput(static function (string $line): void { echo $line . "\n"; });
+    $monitor->start('default', $queue->transport()->consumerName());
+    (new Worker($queue, null, $monitor))->runNextJob(null, 1, 1, 0);
 } elseif ($argv[1] === 'timeout') {
     (new Worker($queue))->runNextJob(null, 1, 1, 0);
 } elseif ($argv[1] === 'drain') {
@@ -202,6 +207,31 @@ if ($argv[1] === 'claim') {
 } elseif ($argv[1] === 'wake') {
     usleep(150000);
     $queue->push(SuccessJob::class);
+} elseif ($argv[1] === 'monitor-commands') {
+    $app->config->set(['default' => 'file', 'stores' => ['file' => ['type' => 'File',
+        'path' => sys_get_temp_dir() . '/' . $config['prefix'] . '/cache/']]], 'cache');
+    $app->config->set(['default' => 'file', 'channels' => ['file' => ['type' => 'File',
+        'path' => sys_get_temp_dir() . '/' . $config['prefix'] . '/log/']]], 'log');
+    $app->config->set($config, 'queue_streams');
+    $service = new Service($app);
+    $service->register();
+    $service->boot();
+    $app->instance(Queue::class, $queue);
+    $monitor = $app->make(\ThinkQueue\Streams\Monitor::class);
+    $queue = new Queue(new Transport($redis, $config), $app, 'default', null, $monitor);
+    $app->instance(Queue::class, $queue);
+    $restored = '';
+    $monitor->setOutput(static function (string $line) use (&$restored): void { $restored = $line; });
+    $events = [];
+    $app->event->listen(\ThinkQueue\Streams\Event\Looping::class,
+        static function ($event) use (&$events): void {
+            $events[] = $event->once;
+            if (!$event->once) $event->queue->push(\ThinkQueue\Streams\Tests\Fixtures\LifecycleJob::class);
+        });
+    $work = $app->console->call('queue:work', ['--max-jobs=1', '--timeout=1'])->fetch();
+    $once = $app->console->call('queue:work', ['--once', '--timeout=1'])->fetch();
+    $id = QueueFacade::push(\ThinkQueue\Streams\Tests\Fixtures\LifecycleJob::class);
+    echo json_encode(compact('work', 'once', 'events', 'id', 'restored'), JSON_THROW_ON_ERROR);
 } elseif ($argv[1] === 'commands') {
     $app->config->set(['default' => 'file', 'stores' => ['file' => ['type' => 'File',
         'path' => sys_get_temp_dir() . '/' . $config['prefix'] . '/cache/']]], 'cache');

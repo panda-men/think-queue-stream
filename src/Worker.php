@@ -11,14 +11,18 @@ use ThinkQueue\Streams\Exception\LeaseLost;
 
 final class Worker
 {
+    private Monitor $monitor;
+
     /**
      * 创建消费者。
      *
      * @param Queue $queue 队列入口
      * @param LoggerInterface|null $logger 业务异常日志
+     * @param Monitor|null $monitor 共享运行日志
      */
-    public function __construct(private Queue $queue, private ?LoggerInterface $logger = null)
+    public function __construct(private Queue $queue, ?LoggerInterface $logger = null, ?Monitor $monitor = null)
     {
+        $this->monitor = $monitor ?? new Monitor($logger);
     }
 
     /**
@@ -45,29 +49,42 @@ final class Worker
         if ($job === null) {
             return false;
         }
+        $queueName = $queue ?? $this->queue->defaultQueue();
+        $consumer = $this->queue->transport()->consumerName();
         $maxTries = $job->payload('max_tries') ?? $tries;
         $jobTimeout = $job->payload('timeout') ?? $timeout;
-        if ($jobTimeout * 1000 >= $this->queue->transport()->retryAfterMs()) {
-            $job->fail(new InvalidArgumentException('任务 timeout 必须小于 retry_after_ms。'));
-            return true;
-        }
+        $context = ['consumer' => $consumer, 'job_id' => $job->getJobId(), 'message_id' => $job->getMessageId(),
+            'job' => $job->payload('job'), 'attempt' => $job->attempts(), 'max_tries' => $maxTries];
+        $start = hrtime(true);
+        $this->monitor->record('claimed', $queueName, $context);
         $previousAlarm = pcntl_signal_get_handler(SIGALRM);
         $previousAsync = pcntl_async_signals(true);
-        // 超时直接结束进程，保留 PEL，让其他消费者在可见性超时后恢复任务。
-        pcntl_signal(SIGALRM, static function (): void { exit(124); });
+        // 超时只输出元数据并退出，保留 PEL；信号处理器不执行 Redis 或业务数据库操作。
+        pcntl_signal(SIGALRM, function () use ($queueName, $consumer, $context, $start, $jobTimeout): void {
+            $this->monitor->record('timed_out', $queueName, $context + ['timeout_seconds' => $jobTimeout,
+                'elapsed_ms' => (int) ((hrtime(true) - $start) / 1000000)], false);
+            $this->monitor->stop($queueName, $consumer, 'timeout', false);
+            exit(124);
+        });
         pcntl_alarm($jobTimeout);
+        $error = null;
         try {
-            if ($job->attempts() > $maxTries) {
-                $job->fail(new RuntimeException('任务已超过最大尝试次数。'));
-                return true;
-            }
-            $job->fire();
-            if (!$job->isDeletedOrReleased()) {
-                throw new RuntimeException('任务返回时尚未调用 delete() 或 release()。');
+            if ($jobTimeout * 1000 >= $this->queue->transport()->retryAfterMs()) {
+                $error = new InvalidArgumentException('任务 timeout 必须小于 retry_after_ms。');
+                $job->fail($error);
+            } elseif ($job->attempts() > $maxTries) {
+                $error = new RuntimeException('任务已超过最大尝试次数。');
+                $job->fail($error);
+            } else {
+                $job->fire();
+                if (!$job->isDeletedOrReleased()) {
+                    throw new RuntimeException('任务返回时尚未调用 delete() 或 release()。');
+                }
             }
         } catch (LeaseLost $exception) {
-            $this->logger?->warning($exception->getMessage(), ['job_id' => $job->getJobId()]);
+            $error = $exception;
         } catch (Throwable $exception) {
+            $error = $exception;
             if (!$job->isDeletedOrReleased()) {
                 if ($job->attempts() >= $maxTries) {
                     $job->fail($exception);
@@ -79,11 +96,26 @@ final class Worker
                     $job->release((int) $backoff);
                 }
             }
-            $this->logger?->error('队列任务处理失败。', ['job_id' => $job->getJobId(), 'exception' => $exception]);
         } finally {
             pcntl_alarm(0);
             pcntl_signal(SIGALRM, $previousAlarm);
             pcntl_async_signals($previousAsync);
+            $context['elapsed_ms'] = (int) ((hrtime(true) - $start) / 1000000);
+            if ($error !== null) $context['exception'] = $error::class;
+            if ($job->hasFailed()) {
+                $event = 'failed';
+            } elseif ($job->isReleased()) {
+                $event = $error === null ? 'released' : 'retried';
+                $context['delay_seconds'] = $job->releaseDelay();
+            } elseif ($error instanceof LeaseLost) {
+                $event = 'lease_lost';
+            } elseif ($error !== null || !$job->isDeleted()) {
+                $event = 'error';
+                $context['reason'] = $job->isDeleted() ? 'exception_after_ack' : 'unsettled';
+            } else {
+                $event = 'succeeded';
+            }
+            $this->monitor->record($event, $queueName, $context);
         }
         return true;
     }

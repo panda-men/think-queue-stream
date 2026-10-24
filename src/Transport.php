@@ -73,6 +73,15 @@ final class Transport
         return (int) $this->config['retry_after_ms'];
     }
 
+    /**
+     * 获取本传输实例实际使用的消费者名称。
+     * @return string 消费者名称
+     */
+    public function consumerName(): string
+    {
+        return $this->consumer;
+    }
+
     public function retryJitter(): bool
     {
         return $this->config['retry_jitter'];
