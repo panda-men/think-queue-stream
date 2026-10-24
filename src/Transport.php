@@ -5,6 +5,7 @@ namespace ThinkQueue\Streams;
 
 use InvalidArgumentException;
 use Redis;
+use ThinkQueue\Streams\Exception\JobIdConflict;
 use ThinkQueue\Streams\Exception\PayloadTooLarge;
 use ThinkQueue\Streams\Exception\QueueFull;
 
@@ -104,16 +105,21 @@ final class Transport
      * @param string $queue 队列名称
      * @param array<string, mixed> $payload 已验证消息体
      * @param int $delayMs 延迟毫秒
+     * @param bool $deduplicate 是否允许将相同内容的活动任务作为重复投递返回
      * @return string 稳定任务 ID
      */
-    public function enqueue(string $queue, array $payload, int $delayMs = 0): string
+    public function enqueue(string $queue, array $payload, int $delayMs = 0, bool $deduplicate = true): string
     {
         if ($delayMs < 0) {
             throw new InvalidArgumentException('延迟不能为负数。');
         }
-        return (string) $this->script('enqueue', $queue, $payload['id'],
-            json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE), $delayMs,
+        $json = json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
+        $result = $this->script('enqueue', $queue, $payload['id'], $json, $delayMs,
             (int) $this->config['max_active_jobs'], (int) $this->config['max_payload_bytes']);
+        if ($result[0] === 'created' || ($deduplicate && Payload::sameTask($result[1], $json))) {
+            return $payload['id'];
+        }
+        throw new JobIdConflict('活动任务 ID ' . $payload['id'] . ' 已被占用，未创建新任务。');
     }
 
     /**

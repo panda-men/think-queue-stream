@@ -13,6 +13,7 @@ use ThinkQueue\Streams\Facade\Queue as QueueFacade;
 use ThinkQueue\Streams\Tests\Fixtures\ThrowingJob;
 use ThinkQueue\Streams\Tests\Fixtures\SuccessJob;
 use ThinkQueue\Streams\Exception\QueueFull;
+use ThinkQueue\Streams\Exception\JobIdConflict;
 
 /** 读取一条 RESP2 帧，同时保留可转发的原始字节。 */
 function readResp($socket): array
@@ -46,16 +47,17 @@ function readResp($socket): array
     return [$raw, $value];
 }
 
-if (in_array($argv[1], ['auth-zero', 'stall-auth', 'stall-select', 'drop-ack-response'], true)) {
+if (in_array($argv[1], ['auth-zero', 'stall-auth', 'stall-select', 'drop-ack-response', 'drop-enqueue-response'], true)) {
     $server = stream_socket_server('tcp://127.0.0.1:0');
     echo substr(strrchr(stream_socket_get_name($server, false), ':'), 1) . "\n";
     flush();
     $client = stream_socket_accept($server, 5);
     $authenticated = false;
-    $upstream = $argv[1] === 'drop-ack-response' ? stream_socket_client('tcp://' .
+    $upstream = in_array($argv[1], ['drop-ack-response', 'drop-enqueue-response'], true) ? stream_socket_client('tcp://' .
         (getenv('REDIS_HOST') ?: '127.0.0.1') . ':' . (getenv('REDIS_PORT') ?: 6379)) : null;
-    $ackSha = sha1(file_get_contents(dirname(__DIR__, 2) . '/src/Lua/common.lua') . "\n" .
-        file_get_contents(dirname(__DIR__, 2) . '/src/Lua/ack.lua'));
+    $dropScript = $argv[1] === 'drop-enqueue-response' ? 'enqueue' : 'ack';
+    $dropSha = sha1(file_get_contents(dirname(__DIR__, 2) . '/src/Lua/common.lua') . "\n" .
+        file_get_contents(dirname(__DIR__, 2) . '/src/Lua/' . $dropScript . '.lua'));
     while (!feof($client)) {
         if (($peek = fread($client, 1)) === '') {
             break;
@@ -78,8 +80,8 @@ if (in_array($argv[1], ['auth-zero', 'stall-auth', 'stall-select', 'drop-ack-res
         if ($upstream !== null) {
             fwrite($upstream, $raw);
             [$reply] = readResp($upstream);
-            if ($command === 'EVALSHA' && $args[1] === $ackSha && $reply[0] !== '-') {
-                echo "ack-applied\n";
+            if ($command === 'EVALSHA' && $args[1] === $dropSha && $reply[0] !== '-') {
+                echo $dropScript . "-applied\n";
                 flush();
                 break;
             }
@@ -164,6 +166,36 @@ if ($argv[1] === 'claim') {
             $queue->push(SuccessJob::class);
             $redis->incr($config['prefix'] . ':accepted');
         } catch (QueueFull) {
+            $redis->incr($config['prefix'] . ':rejected');
+        }
+    }
+} elseif (in_array($argv[1], ['produce-ids', 'produce-collisions', 'produce-duplicates', 'produce-id-conflicts'], true)) {
+    if ($argv[1] === 'produce-collisions') {
+        $generated = 0;
+        $queue = new Queue(new Transport($redis, $config), $app, 'default', static function () use (&$generated): string {
+            return $generated++ === 0 ? str_repeat('0', 32) : bin2hex(random_bytes(16));
+        });
+    }
+    $redis->incr($config['prefix'] . ':ready');
+    $deadline = microtime(true) + 5;
+    while ($redis->get($config['prefix'] . ':start') !== '1') {
+        if (microtime(true) >= $deadline) {
+            throw new RuntimeException('并发生产者等待超时。');
+        }
+        usleep(1000);
+    }
+    for ($i = 0; $i < 10; $i++) {
+        $options = in_array($argv[1], ['produce-duplicates', 'produce-id-conflicts'], true) ? ['id' => 'shared-task'] : [];
+        $data = match ($argv[1]) {
+            'produce-duplicates' => ['report_id' => 10001],
+            'produce-id-conflicts' => ['producer' => getmypid()],
+            default => ['producer' => getmypid(), 'index' => $i],
+        };
+        try {
+            $id = $queue->push(SuccessJob::class, $data, null, $options);
+            $redis->hIncrBy($config['prefix'] . ':returned-ids', $id, 1);
+            $redis->incr($config['prefix'] . ':accepted');
+        } catch (JobIdConflict) {
             $redis->incr($config['prefix'] . ':rejected');
         }
     }
