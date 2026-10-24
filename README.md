@@ -3,8 +3,8 @@
 面向 **PHP 8.2+、ThinkPHP 8** 的 Redis Streams 任务队列。沿用 think-queue 的
 `push/later`、`fire`、`delete/release` 使用习惯，重新实现传输和消费者。
 
-当前为 **v0.1 待发布实现**，版本记录见 [CHANGELOG](CHANGELOG.md)。尚未发布到
-Packagist，也未完成具体业务的生产环境验收。
+当前版本为 **v0.1.0**，版本记录见 [CHANGELOG](CHANGELOG.md)，发布说明见
+[GitHub Releases](https://github.com/panda-men/think-queue-stream/releases)。具体业务仍需完成部署环境验收。
 
 ## 环境要求
 
@@ -15,8 +15,14 @@ Packagist，也未完成具体业务的生产环境验收。
 
 ## 安装与接入
 
-包名：`panda-men/think-queue-stream`。在发布到 Packagist 前，可在项目的
-`composer.json` 添加 VCS 仓库，并在实际推送分支后安装该开发分支：
+包名：`panda-men/think-queue-stream`。安装 v0.1 系列：
+
+```bash
+composer require panda-men/think-queue-stream:^0.1
+```
+
+如果所用 Composer 仓库尚未收录该包，可在项目的 `composer.json` 添加 VCS 仓库，
+然后执行相同的安装命令，Composer 会从 Git 标签解析版本：
 
 ```json
 {
@@ -29,12 +35,6 @@ Packagist，也未完成具体业务的生产环境验收。
 ThinkPHP 的服务发现会注册 `ThinkQueue\Streams\Service` 并发布
 `config/queue_streams.php`。已有项目可执行 `php think service:discover` 和
 `php think vendor:publish`。如果未使用服务发现，在项目服务列表中注册上述 Service。
-
-当前开发分支安装命令：
-
-```bash
-composer require panda-men/think-queue-stream:dev-codex/redis-streams-v1
-```
 
 配置文件不包含凭据默认值，请从部署环境读取 Redis 密码。队列使用自己的专用连接，
 不复用带序列化或客户端 key 前缀的缓存连接。
