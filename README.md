@@ -3,7 +3,7 @@
 面向 **PHP 8.2+、ThinkPHP 8** 的 Redis Streams 任务队列。沿用 think-queue 的
 `push/later`、`fire`、`delete/release` 使用习惯，重新实现传输和消费者。
 
-当前版本为 **v0.2.0**，版本记录和升级说明见 [CHANGELOG](CHANGELOG.md)，发布说明见
+当前版本为 **v0.2.1**，版本记录和升级说明见 [CHANGELOG](CHANGELOG.md)，发布说明见
 [GitHub Releases](https://github.com/panda-men/think-queue-stream/releases)。具体业务仍需完成部署环境验收。
 
 ## 环境要求
