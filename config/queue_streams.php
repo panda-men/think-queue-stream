@@ -7,6 +7,10 @@ return [
     // 指定处理器的例行日志同时在终端和文件中隐藏，例如 ['app\\common\\job\\SendMail@dispatch']。
     // 精确匹配类名@方法；不指定方法时按 @fire。启动、退出及真实异常仍保留。
     'log_silent_jobs' => [],
+    // 日志参数白名单，支持键名或点号路径通配；密码、令牌、正文、收件人等始终隐藏。
+    'log_parameter_keys' => ['id', '*_id', '*_ids', 'business_type', 'type', 'limit'],
+    // 每条日志参数 JSON 的字节上限；同时限制层数、节点数和单个字符串长度。
+    'log_parameter_max_bytes' => 2048,
     // Redis 服务器地址。使用队列专用连接，不复用启用了序列化或客户端键前缀的缓存连接。
     'host' => '127.0.0.1',
     // Redis TCP 端口。

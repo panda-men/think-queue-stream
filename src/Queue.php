@@ -90,23 +90,23 @@ final class Queue
                 // 只重试 Redis 明确返回的 ID 冲突；网络异常等结果不明的写入直接传播。
                 $result = $this->transport->enqueue($queue ?? $this->defaultQueue, $payload, $seconds * 1000, $customId);
                 $this->monitor?->record('published', $queue ?? $this->defaultQueue,
-                    ['job_id' => $result, 'job' => $payload['job'], 'delay_seconds' => $seconds]);
+                    ['job_id' => $result, 'job' => $payload['job'], 'delay_seconds' => $seconds, 'params' => $data]);
                 return $result;
             } catch (JobIdConflict $exception) {
                 if ($customId) {
                     $this->monitor?->record('publish_failed', $queue ?? $this->defaultQueue,
-                        ['job_id' => $id, 'job' => $payload['job'], 'exception' => $exception::class]);
+                        ['job_id' => $id, 'job' => $payload['job'], 'params' => $data] + DiagnosticContext::exception($exception));
                     throw $exception;
                 }
                 $conflict = $exception;
             } catch (\Throwable $exception) {
                 $this->monitor?->record('publish_failed', $queue ?? $this->defaultQueue,
-                    ['job_id' => $id, 'job' => $payload['job'], 'exception' => $exception::class]);
+                    ['job_id' => $id, 'job' => $payload['job'], 'params' => $data] + DiagnosticContext::exception($exception));
                 throw $exception;
             }
         }
         $this->monitor?->record('publish_failed', $queue ?? $this->defaultQueue,
-            ['job' => $payload['job'], 'exception' => JobIdConflict::class, 'reason' => 'id_conflicts_exhausted']);
+            ['job' => $payload['job'], 'exception' => JobIdConflict::class, 'reason' => 'id_conflicts_exhausted', 'params' => $data]);
         throw new JobIdConflict('连续 5 次生成的任务 ID 均已被活动任务占用，未创建新任务。', 0, $conflict);
     }
 
