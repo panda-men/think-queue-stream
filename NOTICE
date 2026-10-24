@@ -1,0 +1,9 @@
+think-queue-stream
+
+The task API and ThinkPHP integration are inspired by topthink/think-queue:
+https://github.com/top-think/think-queue (Apache License 2.0).
+Original project copyright: top-think and its contributors.
+
+This package implements a new Redis Streams transport and worker in the
+ThinkQueue\Streams namespace. It is not an official topthink release and is
+not a binary-compatible replacement for every think-queue feature.
