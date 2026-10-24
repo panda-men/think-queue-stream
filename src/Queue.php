@@ -22,9 +22,10 @@ final class Queue
      * @param App $app ThinkPHP 容器
      * @param string $defaultQueue 默认队列
      * @param Closure|null $idGenerator 可选的 ID 生成器，每次返回一个合法字符串 ID
+     * @param Monitor|null $monitor 可选的运行日志
      */
     public function __construct(private Transport $transport, private App $app, private string $defaultQueue = 'default',
-        private ?Closure $idGenerator = null)
+        private ?Closure $idGenerator = null, private ?Monitor $monitor = null)
     {
         $transport->keys($defaultQueue);
     }
@@ -87,14 +88,25 @@ final class Queue
             $payload['id'] = $id;
             try {
                 // 只重试 Redis 明确返回的 ID 冲突；网络异常等结果不明的写入直接传播。
-                return $this->transport->enqueue($queue ?? $this->defaultQueue, $payload, $seconds * 1000, $customId);
+                $result = $this->transport->enqueue($queue ?? $this->defaultQueue, $payload, $seconds * 1000, $customId);
+                $this->monitor?->record('published', $queue ?? $this->defaultQueue,
+                    ['job_id' => $result, 'job' => $payload['job'], 'delay_seconds' => $seconds]);
+                return $result;
             } catch (JobIdConflict $exception) {
                 if ($customId) {
+                    $this->monitor?->record('publish_failed', $queue ?? $this->defaultQueue,
+                        ['job_id' => $id, 'job' => $payload['job'], 'exception' => $exception::class]);
                     throw $exception;
                 }
                 $conflict = $exception;
+            } catch (\Throwable $exception) {
+                $this->monitor?->record('publish_failed', $queue ?? $this->defaultQueue,
+                    ['job_id' => $id, 'job' => $payload['job'], 'exception' => $exception::class]);
+                throw $exception;
             }
         }
+        $this->monitor?->record('publish_failed', $queue ?? $this->defaultQueue,
+            ['job' => $payload['job'], 'exception' => JobIdConflict::class, 'reason' => 'id_conflicts_exhausted']);
         throw new JobIdConflict('连续 5 次生成的任务 ID 均已被活动任务占用，未创建新任务。', 0, $conflict);
     }
 

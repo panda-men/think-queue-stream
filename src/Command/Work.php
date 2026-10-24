@@ -9,6 +9,8 @@ use think\console\Input;
 use think\console\input\Option;
 use think\console\Output;
 use ThinkQueue\Streams\Queue;
+use ThinkQueue\Streams\Monitor;
+use ThinkQueue\Streams\Event\Looping;
 use ThinkQueue\Streams\Worker;
 
 final class Work extends Command
@@ -52,13 +54,19 @@ final class Work extends Command
             throw new \RuntimeException('queue:work 要求 pcntl 扩展。');
         }
         $queue = $this->app->make(Queue::class);
-        $worker = new Worker($queue, $this->app->log);
+        $monitor = $this->app->make(Monitor::class);
+        $worker = new Worker($queue, null, $monitor);
         $queueName = $input->getOption('queue') ?: $queue->defaultQueue();
         $transport = $queue->transport();
         $restart = $transport->restartToken();
         $start = hrtime(true);
         $processed = 0;
         $stop = false;
+        $reason = 'exception';
+        $previousOutput = $monitor->setOutput(static function (string $line) use ($output): void {
+            $output->writeln($line, Output::OUTPUT_RAW);
+        });
+        $monitor->start($queueName, $transport->consumerName());
         $previousAsync = pcntl_async_signals(true);
         $previousTerm = pcntl_signal_get_handler(SIGTERM);
         $previousInt = pcntl_signal_get_handler(SIGINT);
@@ -67,18 +75,27 @@ final class Work extends Command
         pcntl_signal(SIGINT, $stopHandler);
         try {
             do {
+                $this->app->event->trigger(new Looping($queue, $queueName, (bool) $input->getOption('once')));
                 if ($worker->runNextJob($queueName, $options['tries'], $options['timeout'], $options['delay'])) {
                     $processed++;
                 } elseif ($transport->blockMilliseconds() === 0) {
                     usleep(100000);
                 }
-                if ($input->getOption('once') || $processed >= $options['max-jobs'] ||
-                    (hrtime(true) - $start) / 1000000000 >= $options['max-time'] ||
-                    memory_get_usage(true) >= $options['memory'] * 1048576 ||
-                    $transport->restartToken() !== $restart) {
-                    break;
-                }
+                $reason = match (true) {
+                    $stop => 'signal',
+                    (bool) $input->getOption('once') => 'once',
+                    $processed >= $options['max-jobs'] => 'max_jobs',
+                    (hrtime(true) - $start) / 1000000000 >= $options['max-time'] => 'max_time',
+                    memory_get_usage(true) >= $options['memory'] * 1048576 => 'memory',
+                    $transport->restartToken() !== $restart => 'restart',
+                    default => '',
+                };
+                if ($reason !== '') break;
             } while (!$stop);
+        } catch (\Throwable $exception) {
+            $reason = 'exception';
+            $monitor->record('error', $queueName, ['consumer' => $transport->consumerName(), 'exception' => $exception::class]);
+            throw $exception;
         } finally {
             pcntl_signal(SIGTERM, $previousTerm);
             pcntl_signal(SIGINT, $previousInt);
@@ -86,10 +103,12 @@ final class Work extends Command
             try {
                 $transport->closeConsumer();
             } catch (\Throwable $exception) {
-                $this->app->log->warning('消费者元数据清理失败。', ['exception' => $exception]);
+                $monitor->record('error', $queueName, ['consumer' => $transport->consumerName(),
+                    'reason' => 'consumer_cleanup', 'exception' => $exception::class]);
             }
+            $monitor->stop($queueName, $transport->consumerName(), $reason ?: 'signal');
+            $monitor->setOutput($previousOutput);
         }
-        $output->writeln('消费者退出，本进程领取任务数：' . $processed);
         return 0;
     }
 }
