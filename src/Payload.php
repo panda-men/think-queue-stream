@@ -39,4 +39,44 @@ final class Payload
     {
         return preg_match('/\A\\\\?[a-zA-Z_][a-zA-Z0-9_\\\\]*(?:@[a-zA-Z][a-zA-Z0-9_]*)?\z/D', $job) === 1;
     }
+
+    /** 比较任务内容与执行选项；忽略创建时间，JSON 对象键序不影响去重。 */
+    public static function sameTask(string $stored, string $incoming): bool
+    {
+        try {
+            $storedPayload = json_decode($stored, false, 512, JSON_THROW_ON_ERROR);
+            $incomingPayload = json_decode($incoming, false, 512, JSON_THROW_ON_ERROR);
+            if (!$storedPayload instanceof \stdClass || !$incomingPayload instanceof \stdClass ||
+                !isset($incomingPayload->id) || !is_string($incomingPayload->id)) {
+                return false;
+            }
+            self::decode($stored, $incomingPayload->id);
+            $left = $right = [];
+            foreach (['version', 'id', 'job', 'data', 'max_tries', 'timeout'] as $field) {
+                if (!property_exists($storedPayload, $field) || !property_exists($incomingPayload, $field)) {
+                    return false;
+                }
+                $left[$field] = self::canonicalize($storedPayload->$field);
+                $right[$field] = self::canonicalize($incomingPayload->$field);
+            }
+            return json_encode($left, JSON_THROW_ON_ERROR) === json_encode($right, JSON_THROW_ON_ERROR);
+        } catch (\JsonException|UnexpectedValueException) {
+            // 损坏的旧消息不能被当作成功去重的新任务。
+            return false;
+        }
+    }
+
+    private static function canonicalize(mixed $value): mixed
+    {
+        if ($value instanceof \stdClass) {
+            $properties = get_object_vars($value);
+            ksort($properties, SORT_STRING);
+            $result = new \stdClass();
+            foreach ($properties as $key => $item) {
+                $result->$key = self::canonicalize($item);
+            }
+            return $result;
+        }
+        return is_array($value) ? array_map(self::canonicalize(...), $value) : $value;
+    }
 }

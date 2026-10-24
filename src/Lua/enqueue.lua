@@ -1,5 +1,7 @@
 local id, payload, delay = ARGV[1], ARGV[2], tonumber(ARGV[3])
-if redis.call('HEXISTS', KEYS[3], id) == 1 then return id end
+-- 查重与创建在同一次脚本中完成；返回原消息快照，由调用方区分碰撞和主动去重。
+local existing = redis.call('HGET', KEYS[3], id)
+if existing then return {'exists', existing} end
 local error = admission(payload, ARGV[4], ARGV[5])
 if error then return redis.error_reply(error) end
 redis.call('HSET', KEYS[3], id, payload)
@@ -9,4 +11,4 @@ if delay > 0 then
 else
     redis.call('XADD', KEYS[1], '*', 'job_id', id)
 end
-return id
+return {'created', id}

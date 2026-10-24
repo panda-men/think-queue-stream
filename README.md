@@ -3,7 +3,7 @@
 面向 **PHP 8.2+、ThinkPHP 8** 的 Redis Streams 任务队列。沿用 think-queue 的
 `push/later`、`fire`、`delete/release` 使用习惯，重新实现传输和消费者。
 
-当前版本为 **v0.1.0**，版本记录见 [CHANGELOG](CHANGELOG.md)，发布说明见
+已发布稳定版为 **v0.1.0**，当前开发分支的未发布变更和版本记录见 [CHANGELOG](CHANGELOG.md)，发布说明见
 [GitHub Releases](https://github.com/panda-men/think-queue-stream/releases)。具体业务仍需完成部署环境验收。
 
 ## 环境要求
@@ -45,13 +45,13 @@ use app\job\ExportReport;
 
 // 立即投递：处理器类、业务参数、队列名；返回稳定的队列任务 ID。
 // 这里只传报表 ID，由消费者中的 ReportService 根据 ID 读取业务数据。
-$id = Queue::push(ExportReport::class, ['report_id' => 10001], 'exports');
+$jobId = Queue::push(ExportReport::class, ['report_id' => 10001], 'exports');
 // 延迟投递：第一个参数 60 的单位是秒，即 60 秒后才允许执行。
 Queue::later(60, ExportReport::class, ['report_id' => 10002], 'exports');
 
 // 可选：活动任务 ID 去重。已完成任务不会永久保留去重记录。
 Queue::push(ExportReport::class, ['report_id' => 10003], 'exports', [
-    // 自定义任务 ID；相同 ID 的任务仍处于活动状态时，不会重复创建。
+    // 自定义任务 ID；相同 ID 的活动任务只有内容和执行选项一致时才去重。
     'id' => 'report-10003-v1',
     // 最多领取 5 次，包含首次执行；不是首次执行之外再重试 5 次。
     'max_tries' => 5,
@@ -59,6 +59,57 @@ Queue::push(ExportReport::class, ['report_id' => 10003], 'exports', [
     'timeout' => 30,
 ]);
 ```
+
+### 任务 ID、并发与重复投递
+
+`push()` 和 `later()` 返回字符串任务 ID（`job_id`），表示 Redis 已接受任务，或已存在
+可以去重的同一活动任务，不表示业务已经执行成功。无需追踪任务时可以不接收返回值。
+`report_id` 用于消费者查询业务报表，`job_id` 用于关联队列消息体、延迟记录、尝试次数和日志。
+消费者通过 `$job->getJobId()` 读取相同 ID；重投、超时接管和失败重放不会更换它。
+`$job->getMessageId()` 是本次投递的 Redis Stream ID，重投时可以变化。
+
+**业务主动重新执行应创建新任务；同一任务内部重试才沿用原 ID。** 默认每次调用
+`push()` 或 `later()` 都生成新 ID，即使任务类和业务参数完全相同也会分别入队。
+只有显式传入 `options['id']` 才启用自定义 ID 去重，不会按业务 ID 自动合并任务：
+
+```php
+// 同一份报表的两次独立导出，两条队列任务，返回不同的 job_id。
+$firstJobId = Queue::push(ExportReport::class, ['report_id' => 10001], 'exports');
+$secondJobId = Queue::push(ExportReport::class, ['report_id' => 10001], 'exports');
+```
+
+需要每次都执行时，将业务 ID 放在 `$data` 中，让队列生成任务 ID；系统已有 GUID 或雪花 ID
+时也可以为每次独立执行生成新值传入。任务处理中调用 `$job->release()` 属于原任务重试，
+继续使用原 `job_id`。
+
+默认 ID 是 **32 位十六进制随机字符串**，使用完整的 `bin2hex(random_bytes(16))`，
+保留 128 位随机数，不拼接时间戳。例如：
+
+```text
+e4b7842c3f734f93a54c36f9c8d7a201
+```
+
+并发入队依靠随机数和 Redis 原子查重处理冲突；此格式不承诺严格执行顺序。
+任务创建时间保存在 `created_at` 字段中。已有合法任务 ID 仍可消费、重投及重放，
+无需迁移 Redis 数据。
+
+查重和创建在同一个 Lua 脚本中执行，多个生产者不会同时创建两个相同 ID 的活动任务：
+
+| 入队场景 | 处理规则 |
+| --- | --- |
+| 自动生成 ID 尚未被占用 | 创建新任务并返回 ID。 |
+| 自动生成 ID 已被活动任务占用 | 不作为去重成功；重新生成后尝试，最多生成 5 次，仍冲突则抛出 `Exception\JobIdConflict`。 |
+| 自定义 ID 已存在，任务类、业务参数、`max_tries` 和 `timeout` 一致 | 返回已有 ID，保留原任务内容、尝试次数和延迟安排。创建时间及 JSON 对象键顺序不参与内容差异判断；数组顺序和 JSON 值类型需要一致。 |
+| 自定义 ID 已存在，但上述内容或选项不同，或原消息损坏 | 抛出 `Exception\JobIdConflict`，保留原任务，不覆盖、不静默忽略新任务。 |
+| Redis 连接失败、超时或写入响应丢失 | 直接传播异常，不换 ID 自动重发结果不明的请求。 |
+
+自定义 ID 仍支持 1 至 128 位字母、数字、下划线和连字符；雪花 ID 请转换为字符串传入
+`['id' => $taskId]`。直接构造 `Queue` 时可选传入第四个参数 `Closure` 作为 ID 生成器；
+它只用于未指定自定义 ID 的请求，输出同样需要通过格式校验，并遵循最多 5 次的冲突处理。
+
+去重范围是同一 Redis 前缀下的同一队列，且只覆盖等待、延迟或处理中任务。任务完成、
+最终失败或被隔离后不永久保留去重占位；再次提交相同 ID 可以创建新任务。
+任务 ID 不能替代业务幂等，消费者仍可能因确认前崩溃等原因重复执行业务。
 
 任务仅保存版本化 JSON 数据，不支持序列化整个 PHP 对象。不要把 ORM 模型、资源或
 凭据对象放入消息；业务操作通过 ID 在 Service 中重新读取。
@@ -77,8 +128,9 @@ Queue::push(ExportReport::class, ['report_id' => 10003], 'exports', [
 ```
 
 容量检查和入队在同一个 Lua 内完成；满队列抛出 `Exception\QueueFull`，超大消息抛出
-`Exception\PayloadTooLarge`，调用方可按业务决定稍后提交或拒绝请求。相同活跃任务 ID
-先去重，已有任务 `release()` 不受容量限制；失败记录重放会重新检查容量和字节限制，
+`Exception\PayloadTooLarge`，调用方可按业务决定稍后提交或拒绝请求。相同自定义活动任务 ID
+先检查内容是否一致，一致时去重优先于容量和字节限制，不一致时抛出 `Exception\JobIdConflict`。
+已有任务 `release()` 不受容量限制；失败记录重放会重新检查容量和字节限制，
 被拒绝时保留失败记录。此去重只覆盖任务活跃期间，不能替代业务幂等。
 同一队列的生产者、消费者和重放命令应使用一致的限制配置；降低字节上限后，超限旧消息
 也会在消费时转入隔离记录。
@@ -343,6 +395,8 @@ GitHub Actions 配置 PHP 8.2/8.3/8.4 × Redis 6.2/7.4。测试覆盖立即/延�
 确认前断连、ACK 已执行但响应丢失、Lua 键类型校验和 ThinkPHP 命令集成。
 还覆盖坏消息与缺失消息体隔离、并发生产者容量限制、失败重放背压、统计与心跳维护、
 清理预览与数量上限、脚本缓存失效、密码字符串 `0` 和认证/SELECT 读取超时。
+任务 ID 测试覆盖 32 位随机格式、强制碰撞与重试上限、并发生产者查重、内容冲突、
+旧 ID 兼容，以及入队已执行但响应丢失时不自动换 ID 重发。
 
 可在独立 Redis 上执行可重复的单进程诊断基准：
 

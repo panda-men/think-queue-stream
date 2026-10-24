@@ -7,6 +7,7 @@ use PHPUnit\Framework\TestCase;
 use Redis;
 use think\App;
 use ThinkQueue\Streams\Exception\PayloadTooLarge;
+use ThinkQueue\Streams\Exception\JobIdConflict;
 use ThinkQueue\Streams\Exception\QueueFull;
 use ThinkQueue\Streams\Queue;
 use ThinkQueue\Streams\RedisConnection;
@@ -110,7 +111,13 @@ final class HardeningTest extends TestCase
         $id = $queue->push(SuccessJob::class, [], null, ['id' => 'same-id']);
         $queue->later(60, SuccessJob::class);
         $pending = $queue->pop();
-        self::assertSame($id, $queue->push(SuccessJob::class, str_repeat('x', 2000), null, ['id' => $id]));
+        self::assertSame($id, $queue->push(SuccessJob::class, [], null, ['id' => $id]));
+        try {
+            $queue->push(SuccessJob::class, str_repeat('x', 2000), null, ['id' => $id]);
+            self::fail('相同 ID 的不同任务不能作为成功去重。');
+        } catch (JobIdConflict) {
+            self::assertSame(2, $queue->size());
+        }
         try {
             $queue->push(SuccessJob::class);
             self::fail('满队列必须拒绝新任务。');

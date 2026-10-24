@@ -3,22 +3,28 @@ declare(strict_types=1);
 
 namespace ThinkQueue\Streams;
 
+use Closure;
 use DateInterval;
 use DateTimeImmutable;
 use DateTimeInterface;
 use InvalidArgumentException;
 use think\App;
+use ThinkQueue\Streams\Exception\JobIdConflict;
 
 final class Queue
 {
+    private const MAX_ID_ATTEMPTS = 5;
+
     /**
      * 创建队列入口。
      *
      * @param Transport $transport Redis 传输
      * @param App $app ThinkPHP 容器
      * @param string $defaultQueue 默认队列
+     * @param Closure|null $idGenerator 可选的 ID 生成器，每次返回一个合法字符串 ID
      */
-    public function __construct(private Transport $transport, private App $app, private string $defaultQueue = 'default')
+    public function __construct(private Transport $transport, private App $app, private string $defaultQueue = 'default',
+        private ?Closure $idGenerator = null)
     {
         $transport->keys($defaultQueue);
     }
@@ -53,8 +59,8 @@ final class Queue
         if (!Payload::validJob($job)) {
             throw new InvalidArgumentException('任务名称必须是类名或类名@方法。');
         }
-        $id = $options['id'] ?? bin2hex(random_bytes(16));
-        if (!is_string($id) || !Payload::validId($id)) {
+        $customId = isset($options['id']);
+        if ($customId && (!is_string($options['id']) || !Payload::validId($options['id']))) {
             throw new InvalidArgumentException('任务 ID 格式不正确。');
         }
         foreach (['max_tries', 'timeout'] as $name) {
@@ -68,11 +74,28 @@ final class Queue
         if ($seconds < 0 || $seconds > 31536000) {
             throw new InvalidArgumentException('延迟必须为 0 至 31536000 秒。');
         }
-        $payload = ['version' => 1, 'id' => $id, 'job' => ltrim($job, '\\'), 'data' => $data,
+        $payload = ['version' => 1, 'id' => '', 'job' => ltrim($job, '\\'), 'data' => $data,
             'max_tries' => $options['max_tries'] ?? null, 'timeout' => $options['timeout'] ?? null,
             'created_at' => time()];
-        // JSON 编码发生在写 Redis 之前，拒绝递归引用、资源等不合法参数。
-        return $this->transport->enqueue($queue ?? $this->defaultQueue, $payload, $seconds * 1000);
+        $conflict = null;
+        for ($attempt = 0; $attempt < self::MAX_ID_ATTEMPTS; $attempt++) {
+            $id = $customId ? $options['id'] : ($this->idGenerator !== null ? ($this->idGenerator)() :
+                bin2hex(random_bytes(16)));
+            if (!is_string($id) || !Payload::validId($id)) {
+                throw new InvalidArgumentException('任务 ID 生成器必须返回合法的字符串 ID。');
+            }
+            $payload['id'] = $id;
+            try {
+                // 只重试 Redis 明确返回的 ID 冲突；网络异常等结果不明的写入直接传播。
+                return $this->transport->enqueue($queue ?? $this->defaultQueue, $payload, $seconds * 1000, $customId);
+            } catch (JobIdConflict $exception) {
+                if ($customId) {
+                    throw $exception;
+                }
+                $conflict = $exception;
+            }
+        }
+        throw new JobIdConflict('连续 5 次生成的任务 ID 均已被活动任务占用，未创建新任务。', 0, $conflict);
     }
 
     /**
