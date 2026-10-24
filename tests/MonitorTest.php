@@ -110,6 +110,27 @@ final class MonitorTest extends TestCase
     }
 
     /**
+     * 真实投递、领取及最终失败日志包含业务引用和安全原因，参数只记录脱敏摘要。
+     * @return void
+     */
+    public function testWorkerLogsBusinessReferenceAndSafeFailure(): void
+    {
+        $id = $this->queue->push(LifecycleJob::class, ['action' => 'safe-throw', 'report_id' => 10001,
+            'password' => 'PASSWORD_SECRET', 'body' => 'BODY_SECRET'], null, ['max_tries' => 1]);
+        (new Worker($this->queue, null, $this->monitor))->runNextJob(null, 1, 1, 0);
+        $log = implode("\n", $this->lines);
+        self::assertStringContainsString('job_id=' . $id, $log);
+        self::assertStringContainsString('"report_id":10001', $log);
+        self::assertStringContainsString('error_code=REPORT_NOT_FOUND', $log);
+        self::assertStringContainsString('error_message=报表不存在，请核对报表编号', $log);
+        self::assertStringContainsString('exception_file=', $log);
+        self::assertStringContainsString('exception_line=', $log);
+        self::assertStringNotContainsString('PASSWORD_SECRET', $log);
+        self::assertStringNotContainsString('BODY_SECRET', $log);
+        self::assertStringContainsString('[最终失败]', end($this->lines));
+    }
+
+    /**
      * 静默处理器隐藏例行输出和容量推迟，但不隐藏真实失败，也不改变统计。
      * @return void
      */

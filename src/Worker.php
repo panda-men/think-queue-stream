@@ -54,7 +54,8 @@ final class Worker
         $maxTries = $job->payload('max_tries') ?? $tries;
         $jobTimeout = $job->payload('timeout') ?? $timeout;
         $context = ['consumer' => $consumer, 'job_id' => $job->getJobId(), 'message_id' => $job->getMessageId(),
-            'job' => $job->payload('job'), 'attempt' => $job->attempts(), 'max_tries' => $maxTries];
+            'job' => $job->payload('job'), 'attempt' => $job->attempts(), 'max_tries' => $maxTries,
+            'params' => $job->payload('data')];
         $start = hrtime(true);
         $this->monitor->record('claimed', $queueName, $context);
         $previousAlarm = pcntl_signal_get_handler(SIGALRM);
@@ -101,7 +102,7 @@ final class Worker
             pcntl_signal(SIGALRM, $previousAlarm);
             pcntl_async_signals($previousAsync);
             $context['elapsed_ms'] = (int) ((hrtime(true) - $start) / 1000000);
-            if ($error !== null) $context['exception'] = $error::class;
+            if ($error !== null) $context = array_replace($context, DiagnosticContext::exception($error));
             if ($job->hasFailed()) {
                 $event = 'failed';
             } elseif ($job->isReleased()) {

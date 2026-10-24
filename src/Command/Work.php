@@ -10,6 +10,7 @@ use think\console\input\Option;
 use think\console\Output;
 use ThinkQueue\Streams\Queue;
 use ThinkQueue\Streams\Monitor;
+use ThinkQueue\Streams\DiagnosticContext;
 use ThinkQueue\Streams\Event\Looping;
 use ThinkQueue\Streams\Worker;
 
@@ -94,7 +95,7 @@ final class Work extends Command
             } while (!$stop);
         } catch (\Throwable $exception) {
             $reason = 'exception';
-            $monitor->record('error', $queueName, ['consumer' => $transport->consumerName(), 'exception' => $exception::class]);
+            $monitor->record('error', $queueName, ['consumer' => $transport->consumerName()] + DiagnosticContext::exception($exception));
             throw $exception;
         } finally {
             pcntl_signal(SIGTERM, $previousTerm);
@@ -104,7 +105,7 @@ final class Work extends Command
                 $transport->closeConsumer();
             } catch (\Throwable $exception) {
                 $monitor->record('error', $queueName, ['consumer' => $transport->consumerName(),
-                    'reason' => 'consumer_cleanup', 'exception' => $exception::class]);
+                    'reason' => 'consumer_cleanup'] + DiagnosticContext::exception($exception));
             }
             $monitor->stop($queueName, $transport->consumerName(), $reason ?: 'signal');
             $monitor->setOutput($previousOutput);

@@ -15,6 +15,7 @@ final class LifecycleJob
      */
     public function fire(Job $job, array $data): void
     {
+        if (($data['action'] ?? '') === 'safe-throw') throw new DiagnosticFailure('报表不存在');
         if (($data['action'] ?? '') === 'throw') throw new \RuntimeException('smtp-password SECRET receiver@example.test');
         if (($data['action'] ?? '') === 'release') { $job->release(7); return; }
         $job->delete();
