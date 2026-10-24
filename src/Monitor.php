@@ -7,12 +7,14 @@ use Closure;
 use DateTimeImmutable;
 use Psr\Log\LoggerInterface;
 use Throwable;
+use ThinkQueue\Streams\Exception\QueueFull;
 
 /** 统一的队列运行日志；只接收运行元数据，不记录业务载荷或异常原文。 */
 final class Monitor
 {
     private ?Closure $output = null;
     private array $counts = [];
+    private array $silentJobs = [];
     private const LABELS = ['started' => '启动', 'published' => '投递确认', 'publish_failed' => '投递未确认',
         'claimed' => '领取', 'succeeded' => '成功', 'released' => '主动重投', 'retried' => '重试',
         'failed' => '最终失败', 'lease_lost' => '处理权丢失', 'timed_out' => '执行超时',
@@ -24,9 +26,15 @@ final class Monitor
     /**
      * 创建运行日志。
      * @param LoggerInterface|null $logger 可选的持久化日志通道
+     * @param array<string> $silentJobs 隐藏日常运行日志的处理器，异常日志始终保留
      */
-    public function __construct(private ?LoggerInterface $logger = null)
+    public function __construct(private ?LoggerInterface $logger = null, array $silentJobs = [])
     {
+        foreach ($silentJobs as $job) {
+            if (!is_string($job) || !Payload::validJob($job)) continue;
+            $job = ltrim($job, '\\');
+            $this->silentJobs[str_contains($job, '@') ? $job : $job . '@fire'] = true;
+        }
     }
 
     /**
@@ -79,6 +87,8 @@ final class Monitor
         if (!isset(self::LABELS[$event])) return;
         $counter = $event === 'error' ? 'errors' : $event;
         if (array_key_exists($counter, $this->counts)) $this->counts[$counter]++;
+        // 静默只影响输出；实际领取与处理结果仍进入进程统计。
+        if ($this->isSilent($event, $context)) return;
         $line = '[' . (new DateTimeImmutable())->format('Y-m-d H:i:s.vP') . '][' . self::LABELS[$event] . ']';
         $values = ['queue' => $queue, 'pid' => getmypid()] + array_intersect_key($context, array_flip(self::FIELDS));
         foreach ($values as $key => $value) {
@@ -95,5 +105,23 @@ final class Monitor
         $level = in_array($event, ['failed', 'error', 'timed_out'], true) ? 'error' :
             (in_array($event, ['retried', 'lease_lost', 'publish_failed', 'dispatch_deferred'], true) ? 'warning' : 'info');
         try { $this->logger?->log($level, $line); } catch (Throwable) { /* 日志故障不能引发重复投递或确认失败。 */ }
+    }
+
+    /**
+     * 隐藏指定处理器的例行日志；错误、重试、最终失败、超时和处理权丢失始终可见。
+     * @param string $event 运行事件
+     * @param array<string,mixed> $context 运行元数据
+     * @return bool 是否同时跳过控制台及持久化输出
+     */
+    private function isSilent(string $event, array $context): bool
+    {
+        $job = $context['job'] ?? null;
+        if (!is_string($job)) return false;
+        $job = ltrim($job, '\\');
+        if (!isset($this->silentJobs[str_contains($job, '@') ? $job : $job . '@fire'])) return false;
+        if (in_array($event, ['published', 'claimed', 'succeeded', 'dispatch'], true)) return true;
+        // 调度消息遇到容量限制时会稍后再投；连接异常或 ID 冲突等真实故障继续输出。
+        return in_array($event, ['publish_failed', 'dispatch_deferred'], true) &&
+            ($context['exception'] ?? null) === QueueFull::class;
     }
 }

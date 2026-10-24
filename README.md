@@ -3,7 +3,7 @@
 面向 **PHP 8.2+、ThinkPHP 8** 的 Redis Streams 任务队列。沿用 think-queue 的
 `push/later`、`fire`、`delete/release` 使用习惯，重新实现传输和消费者。
 
-当前版本为 **v0.2.1**，版本记录和升级说明见 [CHANGELOG](CHANGELOG.md)，发布说明见
+当前版本为 **v0.2.2**，版本记录和升级说明见 [CHANGELOG](CHANGELOG.md)，发布说明见
 [GitHub Releases](https://github.com/panda-men/think-queue-stream/releases)。具体业务仍需完成部署环境验收。
 
 ## 环境要求
@@ -20,6 +20,13 @@
 日志不包含业务载荷、异常原文或堆栈，只保留异常类型。`succeeded` 表示处理器正常返回且已确认消息，不能代替业务数据库中的完成状态。`published`（投递确认）既可能新建任务，也可能复用相同自定义活动任务 ID；投递确认中的 `delay_seconds` 是请求值，不会改写已存在任务的延迟。`publish_failed`（投递未确认）不能用于判断 Redis 一定没有写入，网络异常仍应沿用稳定 ID 补偿。日志端故障不影响消息状态转换。
 
 默认通过应用日志持久化，可在 `queue_streams.php` 配置 `log_channel` 为独立通道名；常驻进程建议为通道开启 `realtime_write`。强制任务超时时仅向标准输出写超时与退出统计，并以 124 退出，保留 PEL 供接管；应让进程管理器收集标准输出。`SIGKILL` 无法输出退出日志。`--once`、数量、时间、内存限制、重启标记和停止信号分别记录退出原因。没有任务时不持续输出空闲日志。
+
+对于定期扫描等内部控制任务，可使用 `log_silent_jobs` 按处理器精确隐藏投递确认、领取、扫描结果、正常完成和容量推迟日志；控制台和文件通道同时生效。未写方法名时按 `@fire` 匹配，同一个类的其他方法不会被静默。启动、退出、重试、最终失败、连接故障、ID 冲突等异常日志始终保留，统计仍包含已静默的任务。
+
+```php
+// 静默邮件调度扫描，实际发送方法 @send 仍保留完整日志。
+'log_silent_jobs' => ['app\\common\\job\\SendMail@dispatch'],
+```
 
 业务可监听 `ThinkQueue\Streams\Event\Looping`，每次领取前执行短时、有界的维护或补投；可读取 `$event->queue`、`$event->queueName` 和 `$event->once`。监听器异常会记录类型并让命令退出，由进程管理器重启。对于单次领取模式，应由业务根据 `once` 决定是否跳过补投，避免改变一次领取的含义。不要在监听器中进行无界扫描或长期阻塞。循环事件由当前消费进程串行执行，长任务会推迟下一次触发。
 

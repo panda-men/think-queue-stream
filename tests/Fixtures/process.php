@@ -208,6 +208,9 @@ if ($argv[1] === 'claim') {
     usleep(150000);
     $queue->push(SuccessJob::class);
 } elseif ($argv[1] === 'monitor-commands') {
+    if (($argv[3] ?? '') === 'silent') {
+        $config['log_silent_jobs'] = [\ThinkQueue\Streams\Tests\Fixtures\LifecycleJob::class];
+    }
     $app->config->set(['default' => 'file', 'stores' => ['file' => ['type' => 'File',
         'path' => sys_get_temp_dir() . '/' . $config['prefix'] . '/cache/']]], 'cache');
     $app->config->set(['default' => 'file', 'channels' => ['file' => ['type' => 'File',
