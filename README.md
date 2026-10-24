@@ -3,7 +3,7 @@
 面向 **PHP 8.2+、ThinkPHP 8** 的 Redis Streams 任务队列。沿用 think-queue 的
 `push/later`、`fire`、`delete/release` 使用习惯，重新实现传输和消费者。
 
-已发布稳定版为 **v0.1.0**，当前开发分支的未发布变更和版本记录见 [CHANGELOG](CHANGELOG.md)，发布说明见
+当前版本为 **v0.2.0**，版本记录和升级说明见 [CHANGELOG](CHANGELOG.md)，发布说明见
 [GitHub Releases](https://github.com/panda-men/think-queue-stream/releases)。具体业务仍需完成部署环境验收。
 
 ## 环境要求
@@ -15,10 +15,10 @@
 
 ## 安装与接入
 
-包名：`panda-men/think-queue-stream`。安装 v0.1 系列：
+包名：`panda-men/think-queue-stream`。安装 v0.2 系列：
 
 ```bash
-composer require panda-men/think-queue-stream:^0.1
+composer require panda-men/think-queue-stream:^0.2
 ```
 
 如果所用 Composer 仓库尚未收录该包，可在项目的 `composer.json` 添加 VCS 仓库，
