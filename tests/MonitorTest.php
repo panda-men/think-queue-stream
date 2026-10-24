@@ -106,6 +106,70 @@ final class MonitorTest extends TestCase
     }
 
     /**
+     * 静默处理器隐藏例行输出和容量推迟，但不隐藏真实失败，也不改变统计。
+     * @return void
+     */
+    public function testSilentJobsSuppressRoutineLogsAndKeepFailures(): void
+    {
+        $logger = new class extends AbstractLogger {
+            public array $lines = [];
+            /** 收集持久化端收到的日志。 */
+            public function log($level, string|Stringable $message, array $context = []): void
+            {
+                $this->lines[] = (string) $message;
+            }
+        };
+        $lines = [];
+        $monitor = new Monitor($logger, [LifecycleJob::class]);
+        $monitor->setOutput(static function (string $line) use (&$lines): void { $lines[] = $line; });
+        $queue = new Queue(new Transport($this->redis, $this->config), $this->app, 'default', null, $monitor);
+        $worker = new Worker($queue, null, $monitor);
+        $monitor->start('default', $queue->transport()->consumerName());
+        $queue->push(LifecycleJob::class);
+        $worker->runNextJob(null, 2, 1, 0);
+        $context = ['job' => LifecycleJob::class . '@fire', 'exception' => \ThinkQueue\Streams\Exception\QueueFull::class];
+        foreach (['dispatch', 'dispatch_deferred', 'publish_failed'] as $event) $monitor->record($event, 'default', $context);
+        self::assertCount(1, $lines);
+        self::assertStringContainsString('[启动]', $lines[0]);
+        self::assertSame($lines, $logger->lines);
+
+        $queue->push(LifecycleJob::class, ['action' => 'throw']);
+        $worker->runNextJob(null, 2, 1, 0);
+        $worker->runNextJob(null, 2, 1, 0);
+        $monitor->record('publish_failed', 'default', ['job' => LifecycleJob::class, 'exception' => \RedisException::class]);
+        $monitor->stop('default', $queue->transport()->consumerName(), 'test');
+        $log = implode("\n", $lines);
+        foreach (['[重试]', '[最终失败]', '[投递未确认]', 'exception=RedisException', 'claimed=3 succeeded=1 released=0 retried=1 failed=1'] as $value) {
+            self::assertStringContainsString($value, $log);
+        }
+        self::assertStringNotContainsString('[成功]', $log);
+        self::assertStringNotContainsString('[领取]', $log);
+        self::assertSame($lines, $logger->lines);
+        $monitor->record('published', 'default', ['job' => LifecycleJob::class . '@send']);
+        self::assertStringContainsString('@send', end($lines)); // 同类的其他方法仍然可见。
+    }
+
+    /**
+     * 从实际服务配置读取静默处理器，空闲命令只有启动及退出日志。
+     * @return void
+     */
+    public function testSilentJobConfigurationInRealCommand(): void
+    {
+        $process = proc_open([PHP_BINARY, __DIR__ . '/Fixtures/process.php', 'monitor-commands', $this->config['prefix'], 'silent'],
+            [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+        $output = stream_get_contents($pipes[1]);
+        $error = stream_get_contents($pipes[2]);
+        fclose($pipes[1]); fclose($pipes[2]);
+        self::assertSame(0, proc_close($process), $error . $output);
+        $result = json_decode($output, true, 512, JSON_THROW_ON_ERROR);
+        self::assertSame(2, count(explode("\n", trim($result['work']))));
+        self::assertStringContainsString('[启动]', $result['work']);
+        self::assertStringContainsString('[退出]', $result['work']);
+        self::assertStringContainsString('claimed=1 succeeded=1', $result['work']);
+        self::assertSame([false, true], $result['events']);
+    }
+
+    /**
      * 验证真实命令触发循环事件、输出退出原因并恢复原输出端。
      * @return void
      */
