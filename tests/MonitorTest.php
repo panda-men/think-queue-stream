@@ -60,13 +60,15 @@ final class MonitorTest extends TestCase
         $this->monitor->start('default', $this->queue->transport()->consumerName());
         $worker = new Worker($this->queue, null, $this->monitor);
         foreach (['success', 'release', 'throw'] as $action) {
-            $this->queue->push(LifecycleJob::class, ['action' => $action, 'body' => 'SECRET'], null, ['max_tries' => 2]);
+            $this->queue->push(LifecycleJob::class, ['action' => $action, 'body' => 'SECRET'], null,
+                ['max_tries' => $action === 'throw' ? 3 : 2]);
             $worker->runNextJob(null, 2, 1, 0);
         }
         $worker->runNextJob(null, 2, 1, 0);
+        $worker->runNextJob(null, 2, 1, 0);
         $this->monitor->stop('default', $this->queue->transport()->consumerName(), 'test');
         $log = implode("\n", $this->lines);
-        foreach (['启动', '投递确认', '领取', '成功', '主动重投', '重试', '最终失败', '退出'] as $event) {
+        foreach (['启动', '投递确认', '领取', '成功', '主动重投', '重试 第1次/最多2次', '重试 第2次/最多2次', '最终失败', '退出'] as $event) {
             self::assertStringContainsString('][' . $event . ']', $log);
         }
         self::assertMatchesRegularExpression('/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}\]/', $log);
@@ -75,7 +77,9 @@ final class MonitorTest extends TestCase
         foreach (['job_id=', 'message_id=', 'attempt=2', 'elapsed_ms=', 'delay_seconds=7', 'exception=RuntimeException'] as $field) {
             self::assertStringContainsString($field, $log);
         }
-        self::assertStringContainsString('claimed=4 succeeded=1 released=1 retried=1 failed=1', end($this->lines));
+        self::assertMatchesRegularExpression('/\[重试 第1次\/最多2次\].*attempt=1 max_tries=3.*retry_number=1 max_retries=2/', $log);
+        self::assertMatchesRegularExpression('/\[重试 第2次\/最多2次\].*attempt=2 max_tries=3.*retry_number=2 max_retries=2/', $log);
+        self::assertStringContainsString('claimed=5 succeeded=1 released=1 retried=2 failed=1', end($this->lines));
         self::assertStringNotContainsString('SECRET', $log);
         self::assertStringNotContainsString('receiver@example.test', $log);
     }
@@ -139,7 +143,7 @@ final class MonitorTest extends TestCase
         $monitor->record('publish_failed', 'default', ['job' => LifecycleJob::class, 'exception' => \RedisException::class]);
         $monitor->stop('default', $queue->transport()->consumerName(), 'test');
         $log = implode("\n", $lines);
-        foreach (['[重试]', '[最终失败]', '[投递未确认]', 'exception=RedisException', 'claimed=3 succeeded=1 released=0 retried=1 failed=1'] as $value) {
+        foreach (['[重试 第1次/最多1次]', '[最终失败]', '[投递未确认]', 'exception=RedisException', 'claimed=3 succeeded=1 released=0 retried=1 failed=1'] as $value) {
             self::assertStringContainsString($value, $log);
         }
         self::assertStringNotContainsString('[成功]', $log);
