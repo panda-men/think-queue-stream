@@ -15,4 +15,11 @@ return [
     'block_ms' => 1000,
     'claim_interval_ms' => 1000,
     'promotion_batch' => 100,
+    'promotion_interval_ms' => 1000,
+    'heartbeat_interval_ms' => 10000,
+    'restart_interval_ms' => 1000,
+    // 0 表示不限制活跃任务数量；单条限制包含完整 JSON 信封。
+    'max_active_jobs' => 0,
+    'max_payload_bytes' => 1048576,
+    'retry_jitter' => true,
 ];

@@ -50,11 +50,11 @@ final class Queue
     public function later(int|DateTimeInterface|DateInterval $delay, string $job, mixed $data = [],
         ?string $queue = null, array $options = []): string
     {
-        if (!preg_match('/\A\\\\?[a-zA-Z_][a-zA-Z0-9_\\\\]*(?:@[a-zA-Z][a-zA-Z0-9_]*)?\z/D', $job)) {
+        if (!Payload::validJob($job)) {
             throw new InvalidArgumentException('任务名称必须是类名或类名@方法。');
         }
         $id = $options['id'] ?? bin2hex(random_bytes(16));
-        if (!is_string($id) || !preg_match('/\A[a-zA-Z0-9_-]{1,128}\z/D', $id)) {
+        if (!is_string($id) || !Payload::validId($id)) {
             throw new InvalidArgumentException('任务 ID 格式不正确。');
         }
         foreach (['max_tries', 'timeout'] as $name) {

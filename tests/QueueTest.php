@@ -401,6 +401,14 @@ final class QueueTest extends TestCase
         self::assertSame('1', $result['record']['attempts']);
         self::assertSame(0, $result['failures_after_retry']);
         self::assertNotSame('', $result['restart_token']);
+        self::assertSame(1, $result['stats']['waiting']);
+        self::assertTrue($result['stats']['counts_consistent']);
+        self::assertTrue($result['prune']['dry_run']);
+        self::assertSame('invalid-json', $result['quarantined']['payload']);
+        self::assertSame(0, $result['quarantined_after_forget']);
+        self::assertStringContainsString('已清理', $result['cleanup']);
+        self::assertFalse($result['pruned']['dry_run']);
+        self::assertSame(['1-0'], $result['pruned']['ids']);
     }
 
     /**

@@ -1,9 +1,17 @@
 -- 提前检查键类型；Lua 发生运行时错误不会回滚已经完成的写入。
-local expected = {'stream', 'zset', 'hash', 'hash', 'hash', 'stream'}
+local expected = {'stream', 'zset', 'hash', 'hash', 'hash', 'stream', 'stream', 'zset'}
 for i, kind in ipairs(expected) do
     local actual = redis.call('TYPE', KEYS[i]).ok
     if actual ~= 'none' and actual ~= kind then
         return redis.error_reply('QUEUE_WRONGTYPE ' .. KEYS[i])
+    end
+end
+local function admission(payload, maximum, bytes)
+    if tonumber(bytes) > 0 and string.len(payload) > tonumber(bytes) then
+        return 'QUEUE_PAYLOAD_TOO_LARGE'
+    end
+    if tonumber(maximum) > 0 and redis.call('HLEN', KEYS[3]) >= tonumber(maximum) then
+        return 'QUEUE_FULL'
     end
 end
 local function now_ms()

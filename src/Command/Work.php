@@ -69,7 +69,7 @@ final class Work extends Command
             do {
                 if ($worker->runNextJob($queueName, $options['tries'], $options['timeout'], $options['delay'])) {
                     $processed++;
-                } else {
+                } elseif ($transport->blockMilliseconds() === 0) {
                     usleep(100000);
                 }
                 if ($input->getOption('once') || $processed >= $options['max-jobs'] ||

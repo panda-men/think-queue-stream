@@ -73,6 +73,9 @@ final class Worker
                     $job->fail($exception);
                 } else {
                     $backoff = min(3600, $delay * (2 ** min(20, $job->attempts() - 1)));
+                    if ($backoff > 0 && $this->queue->transport()->retryJitter()) {
+                        $backoff = random_int((int) ceil($backoff / 2), (int) $backoff);
+                    }
                     $job->release((int) $backoff);
                 }
             }

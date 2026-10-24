@@ -5,6 +5,7 @@ namespace ThinkQueue\Streams;
 
 use ThinkQueue\Streams\Command\Manage;
 use ThinkQueue\Streams\Command\Work;
+use ThinkQueue\Streams\Command\Stats;
 
 final class Service extends \think\Service
 {
@@ -29,6 +30,6 @@ final class Service extends \think\Service
      */
     public function boot(): void
     {
-        $this->commands([Work::class, Manage::class]);
+        $this->commands([Work::class, Manage::class, Stats::class]);
     }
 }
