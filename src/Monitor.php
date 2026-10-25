@@ -9,7 +9,7 @@ use Psr\Log\LoggerInterface;
 use Throwable;
 use ThinkQueue\Streams\Exception\QueueFull;
 
-/** 统一的队列运行日志；记录有界业务引用及显式提供的安全错误说明。 */
+/** 统一的队列运行日志；记录完整任务参数及显式提供的错误说明。 */
 final class Monitor
 {
     private ?Closure $output = null;
@@ -23,20 +23,17 @@ final class Monitor
     private const FIELDS = ['consumer', 'job_id', 'message_id', 'job', 'attempt', 'max_tries', 'elapsed_ms',
         'retry_number', 'max_retries', 'delay_seconds', 'timeout_seconds', 'exception', 'reason', 'queued', 'deferred', 'skipped',
         'failed', 'claimed', 'succeeded', 'released', 'retried', 'lease_lost', 'timed_out', 'errors',
-        'params', 'params_truncated', 'error_code', 'error_message', 'exception_file', 'exception_line',
+        'params', 'error_code', 'error_message', 'exception_file', 'exception_line',
         'failure_stage', 'smtp_code', 'cause_exception', 'cause_file', 'cause_line'];
 
     /**
      * 创建运行日志。
      * @param LoggerInterface|null $logger 可选的持久化日志通道
      * @param array<string> $silentJobs 隐藏日常运行日志的处理器，异常日志始终保留
-     * @param array<string> $parameterKeys 可记录的参数键或路径
-     * @param int $maxParameterBytes 参数 JSON 字节上限
      */
-    public function __construct(private ?LoggerInterface $logger = null, array $silentJobs = [],
-        array $parameterKeys = DiagnosticContext::DEFAULT_PARAMETER_KEYS, int $maxParameterBytes = 2048)
+    public function __construct(private ?LoggerInterface $logger = null, array $silentJobs = [])
     {
-        $this->diagnostics = new DiagnosticContext($parameterKeys, $maxParameterBytes);
+        $this->diagnostics = new DiagnosticContext();
         foreach ($silentJobs as $job) {
             if (!is_string($job) || !Payload::validJob($job)) continue;
             $job = ltrim($job, '\\');
@@ -82,7 +79,7 @@ final class Monitor
     }
 
     /**
-     * 写入带时间、时区、队列和进程编号的安全单行日志；日志故障不影响业务状态转换。
+     * 写入带时间、时区、队列和进程编号的单行日志；日志故障不影响业务状态转换。
      * @param string $event 预定义运行事件
      * @param string $queue 队列名称
      * @param array<string,mixed> $context 白名单元数据，其他字段自动丢弃
@@ -97,7 +94,7 @@ final class Monitor
         // 静默只影响输出；实际领取与处理结果仍进入进程统计。
         if ($this->isSilent($event, $context)) return;
         if (array_key_exists('params', $context)) {
-            // 输入始终视作原始参数，即使是字符串也不能绕过筛选策略。
+            // 参数统一编码为完整单行 JSON，保留原有字段名和值。
             $context = array_replace($context, $this->diagnostics->parameters($context['params']));
         }
         $label = self::LABELS[$event];
@@ -116,7 +113,6 @@ final class Monitor
             if (!is_scalar($value)) continue;
             $value = (string) $value;
             if ($key === 'params') { $line .= ' params=' . $value; continue; }
-            if (strlen($value) > 2048) $value = substr($value, 0, 2048) . '[TRUNCATED]';
             if ($key === 'job' && !str_contains($value, '@')) $value .= '@fire';
             // 转义空白和控制字符，防止异常队列名或 ID 伪造多行日志。
             $value = preg_match('/[\s\x00-\x1f\x7f<>]/u', $value) !== 0 ?

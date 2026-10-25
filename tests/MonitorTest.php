@@ -55,7 +55,7 @@ final class MonitorTest extends TestCase
      * 验证领取、成功、主动重投、异常重试和最终失败的实际结果与统计。
      * @return void
      */
-    public function testLifecycleLogsAndCountersExcludeBusinessData(): void
+    public function testLifecycleLogsAndCountersIncludeBusinessData(): void
     {
         $this->monitor->start('default', $this->queue->transport()->consumerName());
         $worker = new Worker($this->queue, null, $this->monitor);
@@ -80,7 +80,9 @@ final class MonitorTest extends TestCase
         self::assertMatchesRegularExpression('/\[重试 第1次\/最多2次\].*attempt=1 max_tries=3.*retry_number=1 max_retries=2/', $log);
         self::assertMatchesRegularExpression('/\[重试 第2次\/最多2次\].*attempt=2 max_tries=3.*retry_number=2 max_retries=2/', $log);
         self::assertStringContainsString('claimed=5 succeeded=1 released=1 retried=2 failed=1', end($this->lines));
-        self::assertStringNotContainsString('SECRET', $log);
+        self::assertStringContainsString('"body":"SECRET"', $log);
+        self::assertStringContainsString('"action":"success"', $log);
+        self::assertStringNotContainsString('smtp-password SECRET', $log);
         self::assertStringNotContainsString('receiver@example.test', $log);
     }
 
@@ -110,13 +112,14 @@ final class MonitorTest extends TestCase
     }
 
     /**
-     * 真实投递、领取及最终失败日志包含业务引用和安全原因，参数只记录脱敏摘要。
+     * 真实投递、领取及最终失败日志完整记录任务参数，并保留业务失败说明。
      * @return void
      */
-    public function testWorkerLogsBusinessReferenceAndSafeFailure(): void
+    public function testWorkerLogsCompleteParametersAndSafeFailure(): void
     {
+        $body = str_repeat('完整邮件正文', 2000);
         $id = $this->queue->push(LifecycleJob::class, ['action' => 'safe-throw', 'report_id' => 10001,
-            'password' => 'PASSWORD_SECRET', 'body' => 'BODY_SECRET'], null, ['max_tries' => 1]);
+            'password' => 'PASSWORD_VALUE', 'body' => $body], null, ['max_tries' => 1]);
         (new Worker($this->queue, null, $this->monitor))->runNextJob(null, 1, 1, 0);
         $log = implode("\n", $this->lines);
         self::assertStringContainsString('job_id=' . $id, $log);
@@ -125,9 +128,37 @@ final class MonitorTest extends TestCase
         self::assertStringContainsString('error_message=报表不存在，请核对报表编号', $log);
         self::assertStringContainsString('exception_file=', $log);
         self::assertStringContainsString('exception_line=', $log);
-        self::assertStringNotContainsString('PASSWORD_SECRET', $log);
-        self::assertStringNotContainsString('BODY_SECRET', $log);
+        self::assertStringContainsString('"password":"PASSWORD_VALUE"', $log);
+        self::assertStringContainsString('"body":"' . $body . '"', $log);
+        self::assertStringNotContainsString('params_truncated', $log);
         self::assertStringContainsString('[最终失败]', end($this->lines));
+    }
+
+    /**
+     * 长日志字段在控制台和持久化通道完整输出，换行仍按单行日志转义。
+     * @return void
+     */
+    public function testLongLogFieldsReachBothOutputsWithoutTruncation(): void
+    {
+        $logger = new class extends AbstractLogger {
+            public array $lines = [];
+            /** 收集持久化端收到的完整日志。 */
+            public function log($level, string|Stringable $message, array $context = []): void
+            {
+                $this->lines[] = (string) $message;
+            }
+        };
+        $monitor = new Monitor($logger);
+        $lines = [];
+        $monitor->setOutput(static function (string $line) use (&$lines): void { $lines[] = $line; });
+        $message = str_repeat('完整错误说明', 1000) . "\nEND";
+        $body = str_repeat('完整任务参数', 2000);
+        $monitor->record('error', 'default', ['error_message' => $message, 'params' => ['body' => $body]]);
+        self::assertSame($lines, $logger->lines);
+        self::assertStringContainsString('error_message=' . json_encode($message, JSON_UNESCAPED_UNICODE), $lines[0]);
+        self::assertStringContainsString('params={"body":"' . $body . '"}', $lines[0]);
+        self::assertStringNotContainsString("\n", $lines[0]);
+        self::assertStringNotContainsString('[TRUNCATED]', $lines[0]);
     }
 
     /**

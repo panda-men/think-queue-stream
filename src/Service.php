@@ -24,9 +24,7 @@ final class Service extends \think\Service
                 // 日志通道初始化失败时仍允许消费，命令的标准输出继续提供运行信息。
                 $logger = null;
             }
-            return new Monitor($logger, (array) $this->app->config->get('queue_streams.log_silent_jobs', []),
-                (array) $this->app->config->get('queue_streams.log_parameter_keys', DiagnosticContext::DEFAULT_PARAMETER_KEYS),
-                (int) $this->app->config->get('queue_streams.log_parameter_max_bytes', 2048));
+            return new Monitor($logger, (array) $this->app->config->get('queue_streams.log_silent_jobs', []));
         });
         $this->app->bind(Queue::class, function (): Queue {
             $config = $this->app->config->get('queue_streams', []);
