@@ -3,7 +3,7 @@
 面向 **PHP 8.2+、ThinkPHP 8** 的 Redis Streams 任务队列。沿用 think-queue 的
 `push/later`、`fire`、`delete/release` 使用习惯，重新实现传输和消费者。
 
-当前版本为 **v0.2.4**，版本记录和升级说明见 [CHANGELOG](CHANGELOG.md)，发布说明见
+当前版本为 **v0.3.0**，版本记录和升级说明见 [CHANGELOG](CHANGELOG.md)，发布说明见
 [GitHub Releases](https://github.com/panda-men/think-queue-stream/releases)。具体业务仍需完成部署环境验收。
 
 ## 环境要求
@@ -17,7 +17,9 @@
 
 `queue:work` 默认显示启动、领取、成功、主动重投、重试、最终失败、处理权丢失和退出日志。每行包含毫秒时间及时区、队列名称、PID；消费日志还包含实际消费者名称、任务 ID、Stream 消息 ID、类名@方法、尝试次数和耗时。重投日志包含实际延迟秒数，退出日志包含原因和本进程统计。异常重试标签直接显示序号，例如 `[重试 第1次/最多2次]`，并带有 `retry_number=1 max_retries=2`；`max_tries=3` 包含首次执行，因此最多重试 2 次。该序号表示本次失败后已安排的下一次重试，原 `attempt` 仍表示刚刚执行的领取次数；主动重投和崩溃接管也会占用相同的尝试预算。
 
-日志增加 `params` 参数摘要，默认只开放 `id`、`*_id`、`*_ids`、`business_type`、`type`、`limit` 等引用值，其他字段隐藏；密码、令牌、正文、收件人等敏感字段优先屏蔽。可通过 `log_parameter_keys` 增加业务单号或点号路径，通过 `log_parameter_max_bytes` 设置 JSON 字节上限（默认 2048，实际限制在 128 至 8192）。同时限制嵌套深度、节点数、字段数和单个字符串长度，截断时带 `params_truncated=1`。不序列化任意对象。`succeeded` 表示处理器正常返回且已确认消息，不能代替业务数据库中的完成状态。`published`（投递确认）既可能新建任务，也可能复用相同自定义活动任务 ID；投递确认中的 `delay_seconds` 是请求值，不会改写已存在任务的延迟。`publish_failed`（投递未确认）不能用于判断 Redis 一定没有写入，网络异常仍应沿用稳定 ID 补偿。日志端故障不影响消息状态转换。
+日志通过 `params` 记录完整的任务参数 JSON，所有字段名和值都直接输出，包括密码、令牌、正文和收件人。参数不按白名单筛选，不设置日志字节数、字符串长度、嵌套层数、节点数或字段数上限，其他日志字段也完整输出。`log_parameter_keys`、`log_parameter_max_bytes` 已移除，不再生成 `params_truncated`。换行和控制字符按 JSON 转义，非法 UTF-8 使用替代字符；不能编码的值采用 JSON 部分输出，编码器抛出异常时 `params` 为 `null`。日志端故障不影响消息状态转换。
+
+`succeeded` 表示处理器正常返回且已确认消息，不能代替业务数据库中的完成状态。`published`（投递确认）既可能新建任务，也可能复用相同自定义活动任务 ID；投递确认中的 `delay_seconds` 是请求值，不会改写已存在任务的延迟。`publish_failed`（投递未确认）不能用于判断 Redis 一定没有写入，网络异常仍应沿用稳定 ID 补偿。
 
 默认通过应用日志持久化，可在 `queue_streams.php` 配置 `log_channel` 为独立通道名；常驻进程建议为通道开启 `realtime_write`。强制任务超时时仅向标准输出写超时与退出统计，并以 124 退出，保留 PEL 供接管；应让进程管理器收集标准输出。`SIGKILL` 无法输出退出日志。`--once`、数量、时间、内存限制、重启标记和停止信号分别记录退出原因。没有任务时不持续输出空闲日志。
 
@@ -53,10 +55,10 @@ final class ReportNotFound extends \RuntimeException implements ProvidesFailureC
 
 ## 安装与接入
 
-包名：`panda-men/think-queue-stream`。安装 v0.2 系列：
+包名：`panda-men/think-queue-stream`。安装 v0.3 系列：
 
 ```bash
-composer require panda-men/think-queue-stream:^0.2
+composer require panda-men/think-queue-stream:^0.3
 ```
 
 如果所用 Composer 仓库尚未收录该包，可在项目的 `composer.json` 添加 VCS 仓库，
