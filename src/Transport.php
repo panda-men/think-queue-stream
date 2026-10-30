@@ -5,6 +5,7 @@ namespace ThinkQueue\Streams;
 
 use InvalidArgumentException;
 use Redis;
+use ThinkQueue\Streams\Exception\FailureStorageException;
 use ThinkQueue\Streams\Exception\JobIdConflict;
 use ThinkQueue\Streams\Exception\PayloadTooLarge;
 use ThinkQueue\Streams\Exception\QueueFull;
@@ -22,14 +23,16 @@ final class Transport
     private string $consumer;
     private array $config;
     private static array $scripts = [];
+    private array $replayCursors = [];
 
     /**
      * 初始化专用 Redis 传输；每个实例使用唯一消费者名称。
      *
      * @param Redis $redis 专用连接，不能启用客户端前缀或序列化
      * @param array<string, mixed> $config 队列配置
+     * @param FailedJobStore|null $failedJobs 独立数据库失败存储，ThinkPHP 服务自动注入
      */
-    public function __construct(private Redis $redis, array $config = [])
+    public function __construct(private Redis $redis, array $config = [], private ?FailedJobStore $failedJobs = null)
     {
         $this->config = array_replace(require __DIR__ . '/../config/queue_streams.php', $config);
         foreach (['retry_after_ms', 'claim_interval_ms', 'promotion_batch', 'promotion_interval_ms',
@@ -96,7 +99,7 @@ final class Transport
      * 为队列生成固定同槽键；第一版只允许一个消费组。
      *
      * @param string $queue 队列名称
-     * @return list<string> 就绪、延迟、消息体、次数、租约、失败、隔离、心跳键
+     * @return list<string> 就绪、延迟、消息体、次数、租约、待落库失败、隔离、心跳、重放回执键
      */
     public function keys(string $queue): array
     {
@@ -105,7 +108,7 @@ final class Transport
         }
         $base = '{' . $this->config['prefix'] . ':' . $queue . '}';
         return array_map(static fn (string $suffix): string => $base . ':' . $suffix,
-            ['ready', 'delayed', 'payloads', 'attempts', 'leases', 'failed', 'quarantine', 'heartbeats']);
+            ['ready', 'delayed', 'payloads', 'attempts', 'leases', 'failed', 'quarantine', 'heartbeats', 'replays']);
     }
 
     /**
@@ -154,6 +157,10 @@ final class Transport
      */
     public function pop(string $queue): ?array
     {
+        // 恢复后先归档历史/待落库失败。数据库异常会直接退出，不再制造新的失败积压。
+        $this->migrateFailed($queue);
+        if ((int) $this->command('XLEN', $this->keys($queue)[5]) > 0) return null;
+        $this->cleanupReplayReceipts($queue);
         $this->initialize($queue);
         $time = $this->monotonicMs();
         if ($time >= ($this->promotionTimes[$queue] ?? 0)) {
@@ -252,6 +259,14 @@ final class Transport
         }
         $result = $this->script($action, $queue, self::GROUP, $reservation['message_id'],
             $this->consumer, $reservation['token'], $reservation['payload']['id'], $extra);
+        if ($action === 'fail' && $result) {
+            try {
+                $this->archiveFailure($queue, (string) $result);
+            } catch (\Throwable $exception) {
+                throw new FailureStorageException('失败记录尚未确认写入数据库，已保留 Redis 待落库记录；请修复数据库后重启消费者。',
+                    0, $exception);
+            }
+        }
         return $action === 'fail' ? ($result ?: false) : $result === 1;
     }
 
@@ -265,18 +280,38 @@ final class Transport
      */
     public function failures(string $queue, int $limit = 100, string $start = '-'): array
     {
-        if ($limit < 1 || $limit > 1000) {
-            throw new InvalidArgumentException('limit 必须在 1 至 1000 之间。');
+        $this->validatePage($limit);
+        $this->migrateFailed($queue, 1000);
+        return $this->failureStore()->records($this->config['prefix'], $queue, $limit, $start);
+    }
+
+    /** 有界迁移旧版失败历史及异常退出遗留的待落库记录，提交数据库后才从 Redis 删除。 */
+    public function migrateFailed(string $queue, int $limit = 100): int
+    {
+        $this->validatePage($limit);
+        $key = $this->keys($queue)[5];
+        $migrated = 0;
+        // 每次只读取一条消息体，避免迁移上千条大载荷时把整批历史载入 PHP 内存。
+        for ($processed = 0; $processed < $limit; $processed++) {
+            $entries = $this->command('XRANGE', $key, '-', '+', 'COUNT', 1);
+            if ($entries === []) break;
+            $migrated += $this->archiveFailure($queue, $entries[0][0]);
         }
-        $result = [];
-        foreach ($this->command('XRANGE', $this->keys($queue)[5], $start, '+', 'COUNT', $limit) as $entry) {
-            $result[$entry[0]] = $this->fields($entry[1]);
-        }
-        return $result;
+        return $migrated;
+    }
+
+    private function archiveFailure(string $queue, string $id): int
+    {
+        $key = $this->keys($queue)[5];
+        $entries = $this->command('XRANGE', $key, $id, $id, 'COUNT', 1);
+        if ($entries === []) return 0;
+        $this->failureStore()->archive($this->config['prefix'], $queue, $id, $this->fields($entries[0][1]),
+            fn (): bool => $this->command('XRANGE', $key, $id, $id, 'COUNT', 1) !== []);
+        return (int) $this->command('XDEL', $key, $id);
     }
 
     /**
-     * 原子重放一条失败消息，保留业务任务 ID 并重置尝试次数。
+     * 重放一条数据库失败消息，行锁与 Redis 回执防止并发重放和响应丢失后重复发布。
      *
      * @param string $queue 队列名称
      * @param string $failureId 失败 Stream ID
@@ -284,8 +319,18 @@ final class Transport
      */
     public function retryFailed(string $queue, string $failureId): ?string
     {
-        return $this->script('replay', $queue, $failureId, (int) $this->config['max_active_jobs'],
-            (int) $this->config['max_payload_bytes']) ?: null;
+        $this->archiveFailure($queue, $failureId);
+        $result = $this->failureStore()->remove($this->config['prefix'], $queue, $failureId,
+            function (array $record) use ($queue, $failureId): string {
+                $payload = Payload::decode($record['payload'], $record['job_id']);
+                // 先清除已落库的同 ID 暂存，防止迁移进程在重放后重新归档旧历史。
+                $this->command('XDEL', $this->keys($queue)[5], $failureId);
+                return $this->script('replay', $queue, $failureId, $payload['id'], $record['payload'],
+                    (int) $this->config['max_active_jobs'], (int) $this->config['max_payload_bytes']);
+            });
+        // 数据库提交后才清回执；崩溃遗留回执由后续消费有界回收。
+        $this->command('HDEL', $this->keys($queue)[8], $failureId);
+        return $result;
     }
 
     /** 分页查看无法执行的协议消息；与业务失败记录分开保存。 */
@@ -311,10 +356,15 @@ final class Transport
         if (!in_array($kind, ['failed', 'quarantined'], true) || $olderThanSeconds < 1) {
             throw new InvalidArgumentException('kind 必须为 failed/quarantined，older-than 必须为正秒数。');
         }
-        return $this->script('prune', $queue, $kind === 'failed' ? 6 : 7, $olderThanSeconds, $limit, $dryRun ? 1 : 0);
+        if ($kind === 'quarantined') return $this->script('prune', $queue, 7, $olderThanSeconds, $limit, $dryRun ? 1 : 0);
+        $this->migrateFailed($queue, 1000);
+        $ids = $this->failureStore()->older($this->config['prefix'], $queue,
+            (int) floor(microtime(true) * 1000) - $olderThanSeconds * 1000, $limit);
+        if (!$dryRun) foreach ($ids as $id) $this->forgetFailed($queue, $id);
+        return $ids;
     }
 
-    /** Redis 6.2 可用的原子快照；等待数基于单组 ACK 后删除的队列约定。 */
+    /** 活跃队列为 Redis 原子快照；failed 单独采样数据库，failed_pending 为待落库数量。 */
     public function stats(string $queue, int $limit = 100, int $offset = 0): array
     {
         $this->validatePage($limit);
@@ -331,7 +381,8 @@ final class Transport
         return ['queue' => $queue, 'group' => self::GROUP, 'sampled_at_ms' => (int) $data[0],
             'active' => (int) $data[1], 'ready_entries' => (int) $data[2],
             'waiting' => max(0, (int) $data[2] - (int) $data[3]), 'pending' => (int) $data[3],
-            'delayed' => (int) $data[4], 'failed' => (int) $data[5], 'quarantined' => (int) $data[6],
+            'delayed' => (int) $data[4], 'failed' => $this->failureStore()->count($this->config['prefix'], $queue),
+            'failed_pending' => (int) $data[5], 'quarantined' => (int) $data[6],
             'consumer_count' => (int) $data[7], 'heartbeat_count' => (int) $data[10],
             'consumers' => $consumers, 'next_offset' => $offset + count($consumers) < (int) $data[10] ? $offset + count($consumers) : null,
             'first_pending' => $first === null ? null : ['message_id' => $first[0], 'consumer' => $first[1],
@@ -358,7 +409,31 @@ final class Transport
      */
     public function forgetFailed(string $queue, string $failureId): bool
     {
-        return $this->command('XDEL', $this->keys($queue)[5], $failureId) === 1;
+        $this->archiveFailure($queue, $failureId);
+        $deleted = $this->failureStore()->remove($this->config['prefix'], $queue, $failureId,
+            function () use ($queue, $failureId): bool {
+                $this->command('XDEL', $this->keys($queue)[5], $failureId);
+                return true;
+            });
+        $this->command('HDEL', $this->keys($queue)[8], $failureId);
+        return $deleted === true;
+    }
+
+    /** 仅回收数据库记录已移除的重放回执；遗留量不会随正常失败历史增长。 */
+    private function cleanupReplayReceipts(string $queue): void
+    {
+        $key = $this->keys($queue)[8];
+        $page = $this->command('HSCAN', $key, $this->replayCursors[$queue] ?? '0', 'COUNT', 100);
+        $this->replayCursors[$queue] = $page[0];
+        for ($i = 0; $i < count($page[1]); $i += 2) {
+            $id = $page[1][$i];
+            if (!$this->failureStore()->exists($this->config['prefix'], $queue, $id)) $this->command('HDEL', $key, $id);
+        }
+    }
+
+    private function failureStore(): FailedJobStore
+    {
+        return $this->failedJobs ?? throw new \RuntimeException('请通过 ThinkPHP 服务创建队列，或向 Transport 第三个参数注入 FailedJobStore。');
     }
 
     /**

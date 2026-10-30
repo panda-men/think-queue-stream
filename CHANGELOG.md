@@ -1,5 +1,24 @@
 # 变更记录
 
+## 0.4.0 — 2026-10-30
+
+- 最终失败历史改存数据库 `failed_jobs` 表，支持 MySQL/MariaDB（InnoDB）和 SQLite，保留原失败 ID、任务参数、错误、尝试次数及失败时间。
+- 新增 `failed_connection`、`failed_table` 配置；通过 ThinkPHP 应用数据库配置创建独立 PDO 连接，失败写入不受业务事务回滚影响。
+- 新增 `queue:manage install` 建表、`migrate-failed` 有界迁移命令；消费者自动补写旧历史和故障遗留，提交成功后清除 Redis 暂存，正常失败不再累积 Redis 历史。
+- 数据库归档未确认时消费者退出，重启后先补写，再处理新任务；唯一键和事务保护并发、重复迁移及旧进程迟到写入。
+- 失败查询、删除、年龄清理、计数及重放统一使用数据库，新增 `failed_pending` 展示待落库数量。`failed` 与 Redis 活跃计数分开采样。
+- 数据库行锁与 Redis 重放回执保护并发重放和发布响应丢失后的恢复；遗留回执有界回收。隔离记录仍使用 Redis，需继续显式清理。
+- 增加数据库故障、独立事务、重复与并发迁移、并发重放、响应丢失和分页隔离测试，CI 同时运行 SQLite 和 MySQL 验证。
+
+### 从 0.3 升级
+
+- 执行 `composer require panda-men/think-queue-stream:^0.4`；`^0.3` 约束不会自动升级到 0.4。
+
+- 停止旧版消费者，部署本变更，确认应用数据库配置和 PDO 驱动，再执行 `php think queue:manage install`。
+- 对每个使用中的队列重复执行 `php think queue:manage migrate-failed --queue=队列名 --limit=1000`，直到 `remaining=0`，再启动新版消费者。
+- 不要混跑新旧版消费者；既有任务投递和消费 API 保持不变，失败 ID 继续沿用原格式。
+- 直接构造 `Transport` 的调用方需要在第三个参数注入 `FailedJobStore`；通过 ThinkPHP Service 接入的应用自动注入。
+
 ## 0.3.0 — 2026-10-25
 
 - 运行日志的 `params` 完整记录任务参数，移除内置敏感字段规则和参数白名单，保留全部字段名和值。

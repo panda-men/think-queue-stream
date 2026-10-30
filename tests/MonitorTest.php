@@ -12,6 +12,7 @@ use ThinkQueue\Streams\Monitor;
 use ThinkQueue\Streams\Queue;
 use ThinkQueue\Streams\RedisConnection;
 use ThinkQueue\Streams\Transport;
+use ThinkQueue\Streams\Tests\Fixtures\FailureDatabase;
 use ThinkQueue\Streams\Worker;
 use ThinkQueue\Streams\Tests\Fixtures\LifecycleJob;
 use ThinkQueue\Streams\Tests\Fixtures\SlowJob;
@@ -38,7 +39,7 @@ final class MonitorTest extends TestCase
         $this->app->instance(\Redis::class, $this->redis);
         $this->monitor = new Monitor();
         $this->monitor->setOutput(function (string $line): void { $this->lines[] = $line; });
-        $this->queue = new Queue(new Transport($this->redis, $this->config), $this->app, 'default', null, $this->monitor);
+        $this->queue = new Queue(new Transport($this->redis, $this->config, FailureDatabase::store($this->config['prefix'])), $this->app, 'default', null, $this->monitor);
     }
 
     /**
@@ -47,6 +48,7 @@ final class MonitorTest extends TestCase
      */
     protected function tearDown(): void
     {
+        FailureDatabase::cleanup($this->config['prefix']);
         foreach ($this->redis->keys('*' . $this->config['prefix'] . '*') as $key) $this->redis->del($key);
         Console::flushStartCallbacks();
     }
@@ -105,7 +107,7 @@ final class MonitorTest extends TestCase
         };
         $monitor = new Monitor($logger);
         $monitor->setOutput(static function (): void { throw new \RuntimeException('output unavailable'); });
-        $queue = new Queue(new Transport($this->redis, $this->config), $this->app, 'default', null, $monitor);
+        $queue = new Queue(new Transport($this->redis, $this->config, FailureDatabase::store($this->config['prefix'])), $this->app, 'default', null, $monitor);
         $queue->push(LifecycleJob::class);
         self::assertTrue((new Worker($queue, null, $monitor))->runNextJob(null, 1, 1, 0));
         self::assertSame(0, $queue->size());
@@ -178,7 +180,7 @@ final class MonitorTest extends TestCase
         $lines = [];
         $monitor = new Monitor($logger, [LifecycleJob::class]);
         $monitor->setOutput(static function (string $line) use (&$lines): void { $lines[] = $line; });
-        $queue = new Queue(new Transport($this->redis, $this->config), $this->app, 'default', null, $monitor);
+        $queue = new Queue(new Transport($this->redis, $this->config, FailureDatabase::store($this->config['prefix'])), $this->app, 'default', null, $monitor);
         $worker = new Worker($queue, null, $monitor);
         $monitor->start('default', $queue->transport()->consumerName());
         $queue->push(LifecycleJob::class);

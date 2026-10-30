@@ -11,6 +11,7 @@ use ThinkQueue\Streams\Exception\LeaseLost;
 use ThinkQueue\Streams\Queue;
 use ThinkQueue\Streams\RedisConnection;
 use ThinkQueue\Streams\Transport;
+use ThinkQueue\Streams\Tests\Fixtures\FailureDatabase;
 use ThinkQueue\Streams\Worker;
 use ThinkQueue\Streams\Tests\Fixtures\SlowJob;
 use ThinkQueue\Streams\Tests\Fixtures\SuccessJob;
@@ -47,6 +48,7 @@ final class QueueTest extends TestCase
      */
     protected function tearDown(): void
     {
+        FailureDatabase::cleanup($this->config['prefix']);
         foreach ($this->redis->keys('*' . $this->config['prefix'] . '*') as $key) {
             $this->redis->del($key);
         }
@@ -300,7 +302,7 @@ final class QueueTest extends TestCase
             $port = (int) trim((string) fgets($pipes[1]));
             self::assertGreaterThan(0, $port);
             $connection = RedisConnection::connect(array_replace($this->config, ['host' => '127.0.0.1', 'port' => $port]));
-            $queue = new Queue(new Transport($connection, $this->config), $this->app);
+            $queue = new Queue(new Transport($connection, $this->config, FailureDatabase::store($this->config['prefix'])), $this->app);
             $job = $queue->pop();
         } finally {
             proc_terminate($proxy, 9);
@@ -409,6 +411,7 @@ final class QueueTest extends TestCase
         self::assertStringContainsString('已清理', $result['cleanup']);
         self::assertFalse($result['pruned']['dry_run']);
         self::assertSame(['1-0'], $result['pruned']['ids']);
+        self::assertSame(['migrated' => 1, 'remaining' => 0], $result['migration']);
     }
 
     /**
@@ -420,7 +423,7 @@ final class QueueTest extends TestCase
     private function newQueue(array $overrides = []): Queue
     {
         $config = array_replace($this->config, $overrides);
-        return new Queue(new Transport(RedisConnection::connect($config), $config), $this->app);
+        return new Queue(new Transport(RedisConnection::connect($config), $config, FailureDatabase::store($this->config['prefix'])), $this->app);
     }
 
     /**

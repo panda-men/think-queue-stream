@@ -3,13 +3,14 @@
 面向 **PHP 8.2+、ThinkPHP 8** 的 Redis Streams 任务队列。沿用 think-queue 的
 `push/later`、`fire`、`delete/release` 使用习惯，重新实现传输和消费者。
 
-当前版本为 **v0.3.0**，版本记录和升级说明见 [CHANGELOG](CHANGELOG.md)，发布说明见
+当前版本为 **v0.4.0**，版本记录和升级说明见 [CHANGELOG](CHANGELOG.md)，发布说明见
 [GitHub Releases](https://github.com/panda-men/think-queue-stream/releases)。具体业务仍需完成部署环境验收。
 
 ## 环境要求
 
 - PHP `^8.2`，ThinkPHP `^8.0`。
 - phpredis 扩展 `>=6.0`，Redis Server `>=6.2`。
+- 最终失败记录使用 MySQL/MariaDB（InnoDB）或 SQLite 数据库，需要相应 PDO 驱动。
 - 消费者要求 Linux/macOS CLI 与 `pcntl`；HTTP 生产者不需要 `pcntl`。
 - 第一版支持单 Redis 实例或稳定的 Redis 服务地址；不支持 `RedisCluster`、多消费组广播。
 
@@ -23,7 +24,7 @@
 
 默认通过应用日志持久化，可在 `queue_streams.php` 配置 `log_channel` 为独立通道名；常驻进程建议为通道开启 `realtime_write`。强制任务超时时仅向标准输出写超时与退出统计，并以 124 退出，保留 PEL 供接管；应让进程管理器收集标准输出。`SIGKILL` 无法输出退出日志。`--once`、数量、时间、内存限制、重启标记和停止信号分别记录退出原因。没有任务时不持续输出空闲日志。
 
-失败日志包含 `exception`、`exception_file`、`exception_line`。业务异常可实现 `ThinkQueue\Streams\Contracts\ProvidesFailureContext::queueFailureContext()`，显式提供可公开的 `error_code` 和 `error_message`，以及可选的 `failure_stage`、`smtp_code`、`cause_exception`、`cause_file`、`cause_line`。提供器抛出异常不会影响任务结算。未提供安全说明的第三方异常使用 `UNHANDLED_EXCEPTION` 和固定提示，保留类型及准确代码位置，不自动输出原始 SQL、认证对话或包含参数的堆栈。此规则只针对新运行日志，不改写已有 Redis 失败记录。
+失败日志包含 `exception`、`exception_file`、`exception_line`。业务异常可实现 `ThinkQueue\Streams\Contracts\ProvidesFailureContext::queueFailureContext()`，显式提供可公开的 `error_code` 和 `error_message`，以及可选的 `failure_stage`、`smtp_code`、`cause_exception`、`cause_file`、`cause_line`。提供器抛出异常不会影响任务结算。未提供安全说明的第三方异常使用 `UNHANDLED_EXCEPTION` 和固定提示，保留类型及准确代码位置，不自动输出原始 SQL、认证对话或包含参数的堆栈。此规则只针对运行日志，不改写失败存储中的原始错误内容。
 
 ```php
 use ThinkQueue\Streams\Contracts\ProvidesFailureContext;
@@ -55,10 +56,10 @@ final class ReportNotFound extends \RuntimeException implements ProvidesFailureC
 
 ## 安装与接入
 
-包名：`panda-men/think-queue-stream`。安装 v0.3 系列：
+包名：`panda-men/think-queue-stream`。安装 v0.4 系列：
 
 ```bash
-composer require panda-men/think-queue-stream:^0.3
+composer require panda-men/think-queue-stream:^0.4
 ```
 
 如果所用 Composer 仓库尚未收录该包，可在项目的 `composer.json` 添加 VCS 仓库，
@@ -78,6 +79,39 @@ ThinkPHP 的服务发现会注册 `ThinkQueue\Streams\Service` 并发布
 
 配置文件不包含凭据默认值，请从部署环境读取 Redis 密码。队列使用自己的专用连接，
 不复用带序列化或客户端 key 前缀的缓存连接。
+
+当前源码使用数据库表保存最终失败记录。在应用 `config/queue_streams.php` 配置：
+
+```php
+'failed_connection' => null, // null 使用 config/database.php 的默认连接，也可指定连接名称。
+'failed_table' => 'failed_jobs', // 完整表名；如需前缀，请显式写成 app_failed_jobs。
+```
+
+部署包含本变更的版本后、启动消费者前，在应用根目录执行：
+
+```bash
+php think queue:manage install
+```
+
+该命令仅创建不存在的表，不改动已有表结构；消费和查询不会自动执行 DDL。建表 SQL 位于
+`sql/mysql/failed_jobs.sql`、`sql/sqlite/failed_jobs.sql`，手动导入时将 `{{table}}` 替换为配置表名。
+失败写入使用独立数据库连接，不参与业务事务；`failed_connection`、`failed_table`、Redis 的
+`prefix` 和队列名称必须在消费者与管理命令间保持一致。共享失败表时，应为不同项目和环境配置不同 `prefix`。
+
+从 Redis 失败历史升级时，先停止所有旧版消费者，再建表、部署新版并按队列迁移：
+
+```bash
+php think queue:manage migrate-failed --queue=exports --limit=1000
+```
+
+每次最多迁移指定数量，返回 `migrated`、`remaining`；重复执行直到 `remaining=0`。
+迁移保留原 `failure_id`，数据库提交成功后才删除对应 Redis 记录，可以中断后重复执行。
+新版消费者每次领取前也会自动补写最多 100 条，先清空待落库记录再处理新任务。
+大量旧历史应在启动消费者前完成显式迁移，避免延后业务消费。不要混跑旧版和新版消费者。
+
+直接构造队列时，需要向 `Transport` 第三个参数传入
+`new FailedJobStore($dedicatedPdo, 'failed_jobs')`；PDO 必须独立于业务连接。
+通过 ThinkPHP Service 接入时自动注入，无需修改投递和处理器代码。
 
 ```php
 use ThinkQueue\Streams\Facade\Queue;
@@ -209,7 +243,7 @@ final class ExportReport
     }
 
     /**
-     * 最终失败后的尽力回调，此时 Redis 中的失败记录已保存。
+     * 最终失败后的尽力回调，此时数据库中的失败记录已提交。
      * @param array{report_id:int} $data 原始业务参数
      * @param \Throwable $exception 导致任务最终失败的异常
      * @return void
@@ -242,6 +276,8 @@ final class ExportReport
 | `read_timeout` | `5.0` | 命令读取超时，单位为**秒**；必须是有限正数，且 `read_timeout * 1000 > block_ms`。 |
 | `prefix` | `think-queue` | Redis 键名前缀，用于隔离项目和环境；仅允许字母、数字、冒号、下划线及连字符。 |
 | `queue` | `default` | 未显式指定队列时使用的队列名，允许通过入队参数或 `--queue` 选择其他队列。 |
+| `failed_connection` | `null` | 失败存储使用的应用数据库连接名称，null 使用 `database.default`；自动创建独立 PDO 连接。 |
+| `failed_table` | `failed_jobs` | 完整失败表名，不自动附加数据库表前缀；先通过 `queue:manage install` 创建。 |
 | `retry_after_ms` | `90000` | 待确认消息空闲多久后允许被接管，单位为**毫秒**。必须满足 `timeout * 1000 < retry_after_ms`；不是异常重试延迟，也不会自动续租。 |
 | `block_ms` | `1000` | 空闲阻塞读取的最长等待，单位为**毫秒**，范围 0 至 5000；0 表示不阻塞，CLI 空闲时仍会短暂休眠。 |
 | `claim_interval_ms` | `1000` | 检查超时待确认消息的间隔，单位为**毫秒**，必须大于 0；接管仍需满足 `retry_after_ms`。 |
@@ -256,17 +292,21 @@ final class ExportReport
 例如 `timeout=60` 表示 60 秒，`retry_after_ms=90000` 表示 90 秒；前者必须严格小于后者。
 配置中的维护间隔不能保证任务准点执行；没有消费者运行时，到期延迟任务不会被搬运。
 `max_active_jobs` 和 `max_payload_bytes` 分别限制数量和单条大小，不是整个 Redis 的内存上限；
-失败和隔离历史还需按保留期单独清理。
+数据库失败历史和 Redis 隔离历史还需按保留期单独清理。
 
 ## 消费与管理
 
 ```bash
+# 创建配置的失败记录表；部署时执行一次，不需要 Redis 可用。
+php think queue:manage install
+# 每次迁移最多 1000 条旧 Redis 失败历史，重复到 remaining=0。
+php think queue:manage migrate-failed --queue=exports --limit=1000
 # 持续消费 exports 队列；最多领取 3 次，单次硬超时 60 秒，异常重试从 3 秒开始退避。
 php think queue:work --queue=exports --tries=3 --timeout=60 --delay=3
 # 只进行一次领取尝试，队列为空也退出；异常重投不增加延迟，本进程仍只领取一次。
 php think queue:work --queue=exports --once --delay=0
 
-# 查看最多 100 条最终失败记录，输出包含 failure_id 和原始任务参数。
+# 查看数据库中最多 100 条最终失败记录，输出包含 failure_id 和原始任务参数。
 php think queue:manage failed --queue=exports --limit=100
 # 重放指定失败记录：把示例 ID 替换为查询得到的 failure_id，不是业务 ID 或 job_id。
 php think queue:manage retry 1234567890000-0 --queue=exports
@@ -328,6 +368,9 @@ php think queue:manage cleanup-consumer '统计返回的消费者名称' --queue
 失败记录查询为 JSON Lines，`failure_id` 是重放或删除命令所需的 Stream ID，
 `job_id` 是跨重投保持不变的任务 ID。重放成功后移除原失败记录，将同一 `job_id` 重新入队，
 领取次数从 0 重新计数；容量或字节检查不通过时保留失败记录。
+失败表保存 `prefix`、`queue`、`failure_id`、`job_id`、原始 JSON `payload`、`attempts`、
+`error`、`failed_at_ms`；`scope` 和 `sort_id` 用于隔离与索引分页。不同前缀或队列的记录互不影响。
+查询和失败清理前会补写最多 1000 条旧 Redis 记录；有大量待迁移记录时先运行 `migrate-failed`。
 例如上一页最后一个 `failure_id` 为 `1234567890000-0`，下一页传 `--start='(1234567890000-0'`；
 开头的 `(` 表示不包含该条记录，参数末尾无需补右括号。
 
@@ -337,8 +380,9 @@ php think queue:manage cleanup-consumer '统计返回的消费者名称' --queue
 每次领取最多处理 100 条坏记录，避免无界循环。隔离记录不直接重放，应先检查并修复
 生产者，再用合法参数重新发布任务。CLI 展示无法编码的字节时会替换字符，Redis 中保留原始字节。
 
-`queue:stats` 提供同一次 Lua 执行内的计数快照：`active`、`waiting`、`pending`、`delayed`、
-`failed`、`quarantined`、`first_pending`、`consumers` 等。`waiting` 是本包单组、确认后删除
+`queue:stats` 的 `active`、`waiting`、`pending`、`delayed`、`failed_pending`、
+`quarantined`、`first_pending`、`consumers` 等来自同一次 Lua 执行；`failed` 单独查询数据库，
+因此跨存储计数不构成同一时点的原子快照。`waiting` 是本包单组、确认后删除
 约定下的 `ready_entries - pending`，不依赖 Redis 7 的 lag；`first_pending` 按消息 ID 排序，
 其 idle 不是整个 PEL 的最大 idle。`counts_consistent` 仅检查活跃消息数与 ready/delayed 数量关系。
 心跳按最近时间分页，`next_offset` 为下一页偏移；页间可能变化，心跳年龄也不等同于进程存活证明。
@@ -352,7 +396,9 @@ php think queue:manage cleanup-consumer '统计返回的消费者名称' --queue
 | `waiting` | 尚未领取的就绪任务数，按 `ready_entries - pending` 计算。 |
 | `pending` | 已被领取、尚未确认的任务数。 |
 | `delayed` | 延迟集合中的任务数，包含等待到期的主动重投或异常重试。 |
-| `failed` / `quarantined` | 最终失败记录数 / 隔离记录数，需要显式维护。 |
+| `failed` | 数据库中的最终失败记录数，需要显式维护。 |
+| `failed_pending` | Redis 中尚待写入数据库的失败记录数；正常落库后为 0。 |
+| `quarantined` | Redis 中隔离记录数，需要显式维护。 |
 | `consumer_count` / `heartbeat_count` | Redis 消费组中的消费者数 / 本包登记的心跳记录数，两者可能不同。 |
 | `consumers` | 当前页的消费者名称、最后心跳时间和心跳年龄；字段末尾 `_ms` 均以毫秒计。 |
 | `first_pending` | 消息 ID 最小的一条 Pending，包含消费者、空闲毫秒数和 Redis 记录的投递次数；不是最大空闲时间。 |
@@ -360,7 +406,8 @@ php think queue:manage cleanup-consumer '统计返回的消费者名称' --queue
 | `next_offset` | 下一页心跳偏移，为 null 时没有下一页。 |
 | `counts_consistent` | `active == ready_entries + delayed` 的数量一致性检查，不代表业务成功或 Redis 持久性。 |
 
-失败和隔离记录默认永久保留，不自动删除。`prune` 按记录 Stream ID 的创建时间筛选，
+数据库失败记录和 Redis 隔离记录默认永久保留，不自动删除。`prune` 对失败记录按
+`failed_at_ms` 筛选（旧记录缺失该字段时使用原 Stream ID 时间），对隔离记录按 Stream ID 时间筛选，
 要求显式给出正整数 `--older-than` 秒数；`--limit` 最大 1000。可用部署平台定时调用该命令。
 `cleanup-consumer` 只处理本包登记的指定消费者，在同一个 Lua 中检查心跳过期和无 Pending；
 `idle-ms` 不得小于 `retry_after_ms` 与两倍 `heartbeat_interval_ms` 中的较大值。
@@ -379,6 +426,17 @@ SIGTERM/SIGINT 与 restart 标记会让消费者在当前任务完成后退出�
 执行 `failed()` 回调前先保存失败记录。如果处理器尚未启动就因超限失败，无法调用尚未
 创建的处理器回调；管理命令中的失败记录是最终状态的查询来源。
 
+最终失败先由 Lua 原子移除活跃任务并写入 `{prefix:queue}:failed` 待落库记录，再提交数据库，
+最后删除 Redis 暂存。Redis 暂存只用于跨存储故障恢复，正常情况下每次失败后即清除，
+不会作为长期失败历史累积。数据库写入或提交未确认时消费者报错退出；重启后先补写待落库记录，
+数据库未恢复前不会继续消费该队列。数据库已提交但 Redis 删除前退出时，唯一键保证重复归档不新增记录。
+故障期间该队列仍可能保留少量在途失败，生产者新增的活跃任务也仍占用 Redis 内存。
+补写恢复不会补调原处理器的 `failed()`，该回调始终是尽力执行。
+
+失败重放在数据库行锁内进行，Redis 同时发布任务并保存重放回执；数据库确认删除失败记录后
+清除回执。网络断开或进程中断时，再次重放会通过回执确认上次发布结果，即使任务已消费也不会
+因此再次发布。数据库记录已移除的遗留回执在后续消费中有界清理。业务执行仍遵循至少一次投递语义。
+
 ## 交付语义与边界
 
 - 按至少一次投递设计。业务成功而 ACK 前进程退出时仍会重复处理，业务幂等必须自行实现。
@@ -389,7 +447,7 @@ SIGTERM/SIGINT 与 restart 标记会让消费者在当前任务完成后退出�
 - ACK、重投、失败迁移都会校验 PEL 当前消费者和本次租约 token，阻止旧 Worker 错误确认。
 - Lua 对相关状态变更提供互斥执行，写入前检查键类型；Lua 本身不提供运行时错误回滚。
 - Redis 服务端持久化、内存淘汰与复制故障仍影响数据持久性；不要把队列与可随意淘汰的缓存混用。
-- 活动任务完成后即删除消息体、尝试次数和租约。失败和隔离消息保留到显式维护，无默认过期。
+- 活动任务完成后即删除消息体、尝试次数和租约。最终失败历史存数据库；隔离历史仍存 Redis，保留到显式维护。
 - 不要对 ready Stream 进行外部 `XTRIM/MAXLEN`、改消费组或手动删除待处理消息。
 - 第一版不提供自动续租。`timeout * 1000` 必须严格小于 `retry_after_ms`；长任务应拆分或提高二者。
 - Worker 超时直接以 124 退出并保留 PEL，由其他消费者在超时后恢复。业务外部操作仍须有自身超时。
@@ -414,13 +472,21 @@ Lua 使用 `EVALSHA`，只有明确的 `NOSCRIPT` 才加载并重发；连接超
 
 ## 测试
 
-Redis 不可用时测试直接失败，不会跳过集成验证：
+默认测试使用每个用例独立的临时 SQLite 文件，需要 `pdo_sqlite`。Redis 不可用时测试直接失败，不会跳过集成验证：
 
 ```bash
 composer install
 composer validate --strict
 composer lint
 REDIS_HOST=127.0.0.1 REDIS_PORT=6379 composer test
+```
+
+在专用 MySQL 测试库上运行同一套验证（仅使用随机测试前缀，结束后删除对应测试记录）：
+
+```bash
+QUEUE_TEST_DB_HOST=127.0.0.1 QUEUE_TEST_DB_PORT=3306 \
+  QUEUE_TEST_DB_NAME=queue_test QUEUE_TEST_DB_USER=root \
+  QUEUE_TEST_DB_PASSWORD=queue-test composer test
 ```
 
 Docker 隔离验证（不使用现有 Redis，不暴露端口）：
@@ -430,13 +496,15 @@ sh scripts/test-docker.sh 8.2 6.2
 sh scripts/test-docker.sh 8.4 7.4
 ```
 
-GitHub Actions 配置 PHP 8.2/8.3/8.4 × Redis 6.2/7.4。测试覆盖立即/延迟投递、
+GitHub Actions 配置 PHP 8.2/8.3/8.4 × Redis 6.2/7.4，每个组合同时验证 SQLite 和 MySQL 8.0。测试覆盖立即/延迟投递、
 重投计数、最终失败及回放、多 PHP 进程竞争、SIGKILL 恢复、任务超时、旧消费者处理权、
 确认前断连、ACK 已执行但响应丢失、Lua 键类型校验和 ThinkPHP 命令集成。
 还覆盖坏消息与缺失消息体隔离、并发生产者容量限制、失败重放背压、统计与心跳维护、
 清理预览与数量上限、脚本缓存失效、密码字符串 `0` 和认证/SELECT 读取超时。
 任务 ID 测试覆盖 32 位随机格式、强制碰撞与重试上限、并发生产者查重、内容冲突、
 旧 ID 兼容，以及入队已执行但响应丢失时不自动换 ID 重发。
+失败存储还覆盖 Redis 历史不累积、数据库故障停消费与补写、重复/并发迁移、分页与前缀隔离、
+并发重放、重放成功但响应丢失且任务已完成后的恢复、业务事务隔离、自定义表和遗留回执回收。
 
 可在独立 Redis 上执行可重复的单进程诊断基准：
 

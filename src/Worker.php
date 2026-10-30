@@ -82,6 +82,10 @@ final class Worker
                     throw new RuntimeException('任务返回时尚未调用 delete() 或 release()。');
                 }
             }
+        } catch (\ThinkQueue\Streams\Exception\FailureStorageException $exception) {
+            // Redis 已结算；禁止将数据库归档故障当作业务异常再次重投。
+            $error = $exception;
+            throw $exception;
         } catch (LeaseLost $exception) {
             $error = $exception;
         } catch (Throwable $exception) {

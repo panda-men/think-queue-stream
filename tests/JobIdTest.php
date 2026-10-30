@@ -15,6 +15,7 @@ use ThinkQueue\Streams\RedisConnection;
 use ThinkQueue\Streams\Tests\Fixtures\SuccessJob;
 use ThinkQueue\Streams\Tests\Fixtures\ThrowingJob;
 use ThinkQueue\Streams\Transport;
+use ThinkQueue\Streams\Tests\Fixtures\FailureDatabase;
 
 final class JobIdTest extends TestCase
 {
@@ -33,6 +34,7 @@ final class JobIdTest extends TestCase
 
     protected function tearDown(): void
     {
+        FailureDatabase::cleanup($this->config['prefix']);
         foreach ($this->redis->keys('*' . $this->config['prefix'] . '*') as $key) {
             $this->redis->del($key);
         }
@@ -292,7 +294,7 @@ final class JobIdTest extends TestCase
     private function newQueue(?Closure $generator = null, array $overrides = []): Queue
     {
         $config = array_replace($this->config, $overrides);
-        return new Queue(new Transport(RedisConnection::connect($config), $config), new App(), 'default', $generator);
+        return new Queue(new Transport(RedisConnection::connect($config), $config, FailureDatabase::store($this->config['prefix'])), new App(), 'default', $generator);
     }
 
     private function runConcurrentProducers(string $mode): void

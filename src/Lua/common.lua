@@ -1,5 +1,5 @@
 -- 提前检查键类型；Lua 发生运行时错误不会回滚已经完成的写入。
-local expected = {'stream', 'zset', 'hash', 'hash', 'hash', 'stream', 'stream', 'zset'}
+local expected = {'stream', 'zset', 'hash', 'hash', 'hash', 'stream', 'stream', 'zset', 'hash'}
 for i, kind in ipairs(expected) do
     local actual = redis.call('TYPE', KEYS[i]).ok
     if actual ~= 'none' and actual ~= kind then

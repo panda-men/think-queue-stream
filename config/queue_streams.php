@@ -25,6 +25,11 @@ return [
     // 未显式指定队列时使用的默认队列名；不是只允许消费这一个队列。
     'queue' => 'default',
 
+    // 最终失败记录使用的应用数据库连接名；null 沿用 database.default，使用独立 PDO 事务。
+    'failed_connection' => null,
+    // 完整失败表名，不自动添加应用数据库表前缀；部署时执行 queue:manage install 创建。
+    'failed_table' => 'failed_jobs',
+
     // 待确认消息的接管等待时间，单位：毫秒；超过此空闲时间后，其他消费者可接管。
     // 必须满足任务 timeout * 1000 < retry_after_ms；不是失败重试的延迟，也不会自动续租。
     'retry_after_ms' => 90000,

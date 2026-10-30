@@ -4,6 +4,7 @@ declare(strict_types=1);
 require dirname(__DIR__, 2) . '/vendor/autoload.php';
 
 use think\App;
+use ThinkQueue\Streams\Tests\Fixtures\FailureDatabase;
 use ThinkQueue\Streams\Queue;
 use ThinkQueue\Streams\RedisConnection;
 use ThinkQueue\Streams\Transport;
@@ -47,15 +48,15 @@ function readResp($socket): array
     return [$raw, $value];
 }
 
-if (in_array($argv[1], ['auth-zero', 'stall-auth', 'stall-select', 'drop-ack-response', 'drop-enqueue-response'], true)) {
+if (in_array($argv[1], ['auth-zero', 'stall-auth', 'stall-select', 'drop-ack-response', 'drop-enqueue-response', 'drop-replay-response'], true)) {
     $server = stream_socket_server('tcp://127.0.0.1:0');
     echo substr(strrchr(stream_socket_get_name($server, false), ':'), 1) . "\n";
     flush();
     $client = stream_socket_accept($server, 5);
     $authenticated = false;
-    $upstream = in_array($argv[1], ['drop-ack-response', 'drop-enqueue-response'], true) ? stream_socket_client('tcp://' .
+    $upstream = in_array($argv[1], ['drop-ack-response', 'drop-enqueue-response', 'drop-replay-response'], true) ? stream_socket_client('tcp://' .
         (getenv('REDIS_HOST') ?: '127.0.0.1') . ':' . (getenv('REDIS_PORT') ?: 6379)) : null;
-    $dropScript = $argv[1] === 'drop-enqueue-response' ? 'enqueue' : 'ack';
+    $dropScript = match ($argv[1]) { 'drop-enqueue-response' => 'enqueue', 'drop-replay-response' => 'replay', default => 'ack' };
     $dropSha = sha1(file_get_contents(dirname(__DIR__, 2) . '/src/Lua/common.lua') . "\n" .
         file_get_contents(dirname(__DIR__, 2) . '/src/Lua/' . $dropScript . '.lua'));
     while (!feof($client)) {
@@ -136,9 +137,16 @@ if ($argv[1] === 'produce') {
 }
 $redis = RedisConnection::connect($config);
 $app = new App();
+$app->config->set(FailureDatabase::configuration($config['prefix']), 'database');
 $app->instance(Redis::class, $redis);
-$queue = new Queue(new Transport($redis, $config), $app);
-if ($argv[1] === 'claim') {
+$queue = new Queue(new Transport($redis, $config, FailureDatabase::store($config['prefix'])), $app);
+if (in_array($argv[1], ['retry-failure', 'migrate-failures'], true)) {
+    $redis->incr($config['prefix'] . ':ready');
+    while ($redis->get($config['prefix'] . ':start') !== '1') usleep(1000);
+    $result = $argv[1] === 'retry-failure' ? $queue->transport()->retryFailed('default', $argv[3]) :
+        $queue->transport()->migrateFailed('default', 1000);
+    echo json_encode($result, JSON_THROW_ON_ERROR);
+} elseif ($argv[1] === 'claim') {
     $job = $queue->pop();
     echo $job?->getJobId() . "\n";
     flush();
@@ -177,7 +185,7 @@ if ($argv[1] === 'claim') {
 } elseif (in_array($argv[1], ['produce-ids', 'produce-collisions', 'produce-duplicates', 'produce-id-conflicts'], true)) {
     if ($argv[1] === 'produce-collisions') {
         $generated = 0;
-        $queue = new Queue(new Transport($redis, $config), $app, 'default', static function () use (&$generated): string {
+        $queue = new Queue(new Transport($redis, $config, FailureDatabase::store($config['prefix'])), $app, 'default', static function () use (&$generated): string {
             return $generated++ === 0 ? str_repeat('0', 32) : bin2hex(random_bytes(16));
         });
     }
@@ -221,7 +229,7 @@ if ($argv[1] === 'claim') {
     $service->boot();
     $app->instance(Queue::class, $queue);
     $monitor = $app->make(\ThinkQueue\Streams\Monitor::class);
-    $queue = new Queue(new Transport($redis, $config), $app, 'default', null, $monitor);
+    $queue = new Queue(new Transport($redis, $config, FailureDatabase::store($config['prefix'])), $app, 'default', null, $monitor);
     $app->instance(Queue::class, $queue);
     $restored = '';
     $monitor->setOutput(static function (string $line) use (&$restored): void { $restored = $line; });
@@ -246,6 +254,7 @@ if ($argv[1] === 'claim') {
     $service->boot();
     QueueFacade::push(ThrowingJob::class, ['counter' => $config['prefix'] . ':counter']);
     $console = $app->console;
+    $console->call('queue:manage', ['install']);
     $workOutput = $console->call('queue:work', ['--once', '--delay=0', '--timeout=1', '--tries=1'])->fetch();
     $record = json_decode(trim($console->call('queue:manage', ['failed', '--limit=1'])->fetch()), true, 512, JSON_THROW_ON_ERROR);
     $console->call('queue:manage', ['retry', $record['failure_id']]);
@@ -262,10 +271,11 @@ if ($argv[1] === 'claim') {
     $cleanup = $console->call('queue:manage', ['cleanup-consumer', $consumer, '--queue=invalid', '--idle-ms=300000'])->fetch();
     $console->call('queue:manage', ['forget-quarantine', $quarantined['quarantine_id'], '--queue=invalid']);
     $redis->xAdd($transport->keys('history')[5], '1-0', ['error' => 'old']);
+    $migration = json_decode($console->call('queue:manage', ['migrate-failed', '--queue=history', '--limit=1'])->fetch(), true, 512, JSON_THROW_ON_ERROR);
     $pruned = json_decode($console->call('queue:manage', ['prune', '--queue=history', '--older-than=86400'])->fetch(), true, 512, JSON_THROW_ON_ERROR);
     echo json_encode(['work_output' => $workOutput, 'record' => $record,
         'failures_after_retry' => count(QueueFacade::transport()->failures('default')),
         'restart_token' => QueueFacade::transport()->restartToken(), 'stats' => $stats, 'prune' => $preview,
         'quarantined' => $quarantined, 'quarantined_after_forget' => count($transport->quarantined('invalid')),
-        'cleanup' => $cleanup, 'pruned' => $pruned], JSON_THROW_ON_ERROR);
+        'cleanup' => $cleanup, 'pruned' => $pruned, 'migration' => $migration], JSON_THROW_ON_ERROR);
 }

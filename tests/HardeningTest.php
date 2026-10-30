@@ -12,6 +12,7 @@ use ThinkQueue\Streams\Exception\QueueFull;
 use ThinkQueue\Streams\Queue;
 use ThinkQueue\Streams\RedisConnection;
 use ThinkQueue\Streams\Transport;
+use ThinkQueue\Streams\Tests\Fixtures\FailureDatabase;
 use ThinkQueue\Streams\Worker;
 use ThinkQueue\Streams\Tests\Fixtures\SuccessJob;
 use ThinkQueue\Streams\Tests\Fixtures\ThrowingJob;
@@ -33,6 +34,7 @@ final class HardeningTest extends TestCase
 
     protected function tearDown(): void
     {
+        FailureDatabase::cleanup($this->config['prefix']);
         foreach ($this->redis->keys('*' . $this->config['prefix'] . '*') as $key) {
             $this->redis->del($key);
         }
@@ -410,7 +412,7 @@ final class HardeningTest extends TestCase
         $app = new App();
         $redis = RedisConnection::connect($config);
         $app->instance(Redis::class, $redis);
-        return new Queue(new Transport($redis, $config), $app);
+        return new Queue(new Transport($redis, $config, FailureDatabase::store($this->config['prefix'])), $app);
     }
 
     private function getCalls(): int

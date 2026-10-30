@@ -16,6 +16,20 @@ final class Service extends \think\Service
      */
     public function register(): void
     {
+        $this->app->bind(FailedJobStore::class, function (): FailedJobStore {
+            return new FailedJobStore(function (): \PDO {
+                $name = $this->app->config->get('queue_streams.failed_connection');
+                $source = $this->app->db->connect($name);
+                $config = $source->getConfig();
+                // 独立连接，不复用业务 PDO，也不参与业务层尚未提交的事务。
+                $config['params'][\PDO::ATTR_PERSISTENT] = false;
+                $class = $source::class;
+                $connection = new $class($config);
+                $connection->setDb($this->app->db);
+                $connection->query('SELECT 1', [], true);
+                return $connection->getPdo();
+            }, (string) $this->app->config->get('queue_streams.failed_table', 'failed_jobs'));
+        });
         $this->app->bind(Monitor::class, function (): Monitor {
             try {
                 $channel = $this->app->config->get('queue_streams.log_channel');
@@ -28,7 +42,7 @@ final class Service extends \think\Service
         });
         $this->app->bind(Queue::class, function (): Queue {
             $config = $this->app->config->get('queue_streams', []);
-            return new Queue(new Transport(RedisConnection::connect($config), $config), $this->app,
+            return new Queue(new Transport(RedisConnection::connect($config), $config, $this->app->make(FailedJobStore::class)), $this->app,
                 (string) ($config['queue'] ?? 'default'), null, $this->app->make(Monitor::class));
         });
     }

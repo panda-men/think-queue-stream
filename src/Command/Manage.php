@@ -10,6 +10,7 @@ use think\console\input\Argument;
 use think\console\input\Option;
 use think\console\Output;
 use ThinkQueue\Streams\Queue;
+use ThinkQueue\Streams\FailedJobStore;
 
 final class Manage extends Command
 {
@@ -21,7 +22,7 @@ final class Manage extends Command
     protected function configure(): void
     {
         $this->setName('queue:manage')->setDescription('查看和维护失败、隔离记录及消费者')
-            ->addArgument('action', Argument::REQUIRED, 'failed、quarantined、retry、forget、forget-quarantine、prune、cleanup-consumer 或 restart')
+            ->addArgument('action', Argument::REQUIRED, 'install、migrate-failed、failed、quarantined、retry、forget、forget-quarantine、prune、cleanup-consumer 或 restart')
             ->addArgument('id', Argument::OPTIONAL, '记录 Stream ID 或消费者名称')
             ->addOption('queue', null, Option::VALUE_REQUIRED, '队列名称')
             ->addOption('start', null, Option::VALUE_REQUIRED, '失败记录起始 ID，支持 (ID', '-')
@@ -42,8 +43,13 @@ final class Manage extends Command
     protected function execute(Input $input, Output $output): int
     {
         $action = $input->getArgument('action');
-        if (!in_array($action, ['failed', 'quarantined', 'retry', 'forget', 'forget-quarantine', 'prune', 'cleanup-consumer', 'restart'], true)) {
+        if (!in_array($action, ['install', 'migrate-failed', 'failed', 'quarantined', 'retry', 'forget', 'forget-quarantine', 'prune', 'cleanup-consumer', 'restart'], true)) {
             throw new InvalidArgumentException('未知管理动作。');
+        }
+        if ($action === 'install') {
+            $this->app->make(FailedJobStore::class)->install();
+            $output->writeln('失败记录表已创建。');
+            return 0;
         }
         $id = $input->getArgument('id');
         if (in_array($action, ['retry', 'forget', 'forget-quarantine'], true) &&
@@ -58,10 +64,16 @@ final class Manage extends Command
             $output->writeln('已更新重启标记；消费者将在当前任务结束后退出。');
             return 0;
         }
-        if (in_array($action, ['failed', 'quarantined', 'prune'], true)) {
+        if (in_array($action, ['migrate-failed', 'failed', 'quarantined', 'prune'], true)) {
             $limit = filter_var($input->getOption('limit'), FILTER_VALIDATE_INT);
             if ($limit === false) {
                 throw new InvalidArgumentException('limit 必须为整数。');
+            }
+            if ($action === 'migrate-failed') {
+                $migrated = $transport->migrateFailed($queueName, $limit);
+                $output->writeln(json_encode(['migrated' => $migrated,
+                    'remaining' => $transport->stats($queueName)['failed_pending']], JSON_THROW_ON_ERROR), Output::OUTPUT_RAW);
+                return 0;
             }
             if ($action === 'prune') {
                 $seconds = filter_var($input->getOption('older-than'), FILTER_VALIDATE_INT);

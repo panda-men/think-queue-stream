@@ -5,6 +5,7 @@
     "license": "Apache-2.0",
     "require": {
         "php": "^8.2",
+        "ext-pdo": "*",
         "ext-redis": ">=6.0",
         "topthink/framework": "^8.0"
     },
@@ -44,6 +45,8 @@
         "source": "https://github.com/panda-men/think-queue-stream"
     },
     "suggest": {
-        "ext-pcntl": "Required by queue:work to enforce task execution timeouts"
+        "ext-pcntl": "Required by queue:work to enforce task execution timeouts",
+        "ext-pdo_mysql": "Store failed jobs in MySQL/MariaDB",
+        "ext-pdo_sqlite": "Store failed jobs in SQLite and run the default test suite"
     }
 }
