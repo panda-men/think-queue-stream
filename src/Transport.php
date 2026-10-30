@@ -143,6 +143,7 @@ final class Transport
     public function promote(string $queue): int
     {
         $result = $this->script('promote', $queue, (int) $this->config['promotion_batch']);
+        foreach ($result[3] as $id) $this->persistFailure($queue, 'q:' . $id);
         $wait = $result[1] === '' ? (int) $this->config['promotion_interval_ms'] :
             min((int) $this->config['promotion_interval_ms'], max(0, (int) $result[1] - (int) $result[2]));
         $this->promotionTimes[$queue] = $this->monotonicMs() + $wait;
@@ -159,7 +160,7 @@ final class Transport
     {
         // 恢复后先归档历史/待落库失败。数据库异常会直接退出，不再制造新的失败积压。
         $this->migrateFailed($queue);
-        if ((int) $this->command('XLEN', $this->keys($queue)[5]) > 0) return null;
+        if ($this->pendingFailures($queue) > 0) return null;
         $this->cleanupReplayReceipts($queue);
         $this->initialize($queue);
         $time = $this->monotonicMs();
@@ -200,9 +201,10 @@ final class Transport
                 return ['payload' => $payload, 'attempts' => (int) $reserved[1],
                     'message_id' => $entry[0], 'token' => $token];
             } catch (\JsonException|\UnexpectedValueException $exception) {
-                $this->script('quarantine', $queue, self::GROUP, $entry[0], $this->consumer, $token, $id,
+                $failure = $this->script('quarantine', $queue, self::GROUP, $entry[0], $this->consumer, $token, $id,
                     substr($exception::class . ': ' . $exception->getMessage(), 0, 8192),
                     json_encode($entry[1] ?? [], JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE));
+                if ($failure) $this->persistFailure($queue, 'q:' . $failure);
             }
         }
         return null;
@@ -260,12 +262,7 @@ final class Transport
         $result = $this->script($action, $queue, self::GROUP, $reservation['message_id'],
             $this->consumer, $reservation['token'], $reservation['payload']['id'], $extra);
         if ($action === 'fail' && $result) {
-            try {
-                $this->archiveFailure($queue, (string) $result);
-            } catch (\Throwable $exception) {
-                throw new FailureStorageException('失败记录尚未确认写入数据库，已保留 Redis 待落库记录；请修复数据库后重启消费者。',
-                    0, $exception);
-            }
+            $this->persistFailure($queue, (string) $result);
         }
         return $action === 'fail' ? ($result ?: false) : $result === 1;
     }
@@ -285,29 +282,61 @@ final class Transport
         return $this->failureStore()->records($this->config['prefix'], $queue, $limit, $start);
     }
 
-    /** 有界迁移旧版失败历史及异常退出遗留的待落库记录，提交数据库后才从 Redis 删除。 */
+    /** 迁移两类历史和待落库记录，合计最多 limit 条，提交成功后再删除 Redis 暂存。 */
     public function migrateFailed(string $queue, int $limit = 100): int
     {
         $this->validatePage($limit);
-        $key = $this->keys($queue)[5];
         $migrated = 0;
         // 每次只读取一条消息体，避免迁移上千条大载荷时把整批历史载入 PHP 内存。
         for ($processed = 0; $processed < $limit; $processed++) {
-            $entries = $this->command('XRANGE', $key, '-', '+', 'COUNT', 1);
+            $entries = $this->command('XRANGE', $this->keys($queue)[5], '-', '+', 'COUNT', 1);
+            $prefix = '';
+            if ($entries === []) {
+                $entries = $this->command('XRANGE', $this->keys($queue)[6], '-', '+', 'COUNT', 1);
+                $prefix = 'q:';
+            }
             if ($entries === []) break;
-            $migrated += $this->archiveFailure($queue, $entries[0][0]);
+            $migrated += $this->archiveFailure($queue, $prefix . $entries[0][0]);
         }
         return $migrated;
     }
 
     private function archiveFailure(string $queue, string $id): int
     {
-        $key = $this->keys($queue)[5];
-        $entries = $this->command('XRANGE', $key, $id, $id, 'COUNT', 1);
+        [$key, $streamId] = $this->failureLocation($queue, $id);
+        $entries = $this->command('XRANGE', $key, $streamId, $streamId, 'COUNT', 1);
         if ($entries === []) return 0;
         $this->failureStore()->archive($this->config['prefix'], $queue, $id, $this->fields($entries[0][1]),
-            fn (): bool => $this->command('XRANGE', $key, $id, $id, 'COUNT', 1) !== []);
-        return (int) $this->command('XDEL', $key, $id);
+            fn (): bool => $this->command('XRANGE', $key, $streamId, $streamId, 'COUNT', 1) !== []);
+        return (int) $this->command('XDEL', $key, $streamId);
+    }
+
+    /** 两个 Redis Stream 可以产生相同 ID，隔离记录使用 q: 前缀避免归档覆盖。 */
+    private function failureLocation(string $queue, string $id): array
+    {
+        if (!preg_match('/\A(q:)?\d{1,20}-\d{1,20}\z/D', $id)) {
+            throw new InvalidArgumentException('失败记录 ID 必须是 Stream ID，隔离记录可带 q: 前缀。');
+        }
+        $quarantined = str_starts_with($id, 'q:');
+        return [$this->keys($queue)[$quarantined ? 6 : 5], $quarantined ? substr($id, 2) : $id];
+    }
+
+    /** 原子结算后归档失败必须让消费者退出，禁止将坏消息或已结算任务重新执行业务。 */
+    private function persistFailure(string $queue, string $id): void
+    {
+        try {
+            $this->archiveFailure($queue, $id);
+        } catch (\Throwable $exception) {
+            throw new FailureStorageException('失败记录尚未确认写入数据库，已保留 Redis 待落库记录；请修复数据库后重启消费者。',
+                0, $exception);
+        }
+    }
+
+    /** 查看两类待落库总数，管理脚本可在数据库恢复前只读检查。 */
+    public function pendingFailures(string $queue): int
+    {
+        $keys = $this->keys($queue);
+        return (int) $this->command('XLEN', $keys[5]) + (int) $this->command('XLEN', $keys[6]);
     }
 
     /**
@@ -322,6 +351,9 @@ final class Transport
         $this->archiveFailure($queue, $failureId);
         $result = $this->failureStore()->remove($this->config['prefix'], $queue, $failureId,
             function (array $record) use ($queue, $failureId): string {
+                if ($record['failure_kind'] === 'quarantined') {
+                    throw new InvalidArgumentException('隔离坏消息不能直接重放，请先修复消息格式，再用合法参数重新发布。');
+                }
                 $payload = Payload::decode($record['payload'], $record['job_id']);
                 // 先清除已落库的同 ID 暂存，防止迁移进程在重放后重新归档旧历史。
                 $this->command('XDEL', $this->keys($queue)[5], $failureId);
@@ -333,20 +365,24 @@ final class Transport
         return $result;
     }
 
-    /** 分页查看无法执行的协议消息；与业务失败记录分开保存。 */
+    /** 从统一失败表筛选坏消息；保留原有 quarantine_id 查询接口。 */
     public function quarantined(string $queue, int $limit = 100, string $start = '-'): array
     {
         $this->validatePage($limit);
         $result = [];
-        foreach ($this->command('XRANGE', $this->keys($queue)[6], $start, '+', 'COUNT', $limit) as $entry) {
-            $result[$entry[0]] = $this->fields($entry[1]);
+        $this->migrateFailed($queue, 1000);
+        $exclusive = str_starts_with($start, '(');
+        $id = $exclusive ? substr($start, 1) : $start;
+        $cursor = $id === '-' ? '-' : ($exclusive ? '(' : '') . (str_starts_with($id, 'q:') ? $id : 'q:' . $id);
+        foreach ($this->failureStore()->records($this->config['prefix'], $queue, $limit, $cursor, 'quarantined') as $id => $record) {
+            $result[substr($id, 2)] = ['failure_id' => $id] + $record;
         }
         return $result;
     }
 
     public function forgetQuarantined(string $queue, string $id): bool
     {
-        return $this->command('XDEL', $this->keys($queue)[6], $id) === 1;
+        return $this->forgetFailed($queue, str_starts_with($id, 'q:') ? $id : 'q:' . $id);
     }
 
     /** 按年龄有界清理；默认由调用方显式触发，dry-run 只返回候选 ID。 */
@@ -356,10 +392,10 @@ final class Transport
         if (!in_array($kind, ['failed', 'quarantined'], true) || $olderThanSeconds < 1) {
             throw new InvalidArgumentException('kind 必须为 failed/quarantined，older-than 必须为正秒数。');
         }
-        if ($kind === 'quarantined') return $this->script('prune', $queue, 7, $olderThanSeconds, $limit, $dryRun ? 1 : 0);
         $this->migrateFailed($queue, 1000);
         $ids = $this->failureStore()->older($this->config['prefix'], $queue,
-            (int) floor(microtime(true) * 1000) - $olderThanSeconds * 1000, $limit);
+            (int) floor(microtime(true) * 1000) - $olderThanSeconds * 1000, $limit,
+            $kind === 'quarantined' ? 'quarantined' : null);
         if (!$dryRun) foreach ($ids as $id) $this->forgetFailed($queue, $id);
         return $ids;
     }
@@ -382,7 +418,9 @@ final class Transport
             'active' => (int) $data[1], 'ready_entries' => (int) $data[2],
             'waiting' => max(0, (int) $data[2] - (int) $data[3]), 'pending' => (int) $data[3],
             'delayed' => (int) $data[4], 'failed' => $this->failureStore()->count($this->config['prefix'], $queue),
-            'failed_pending' => (int) $data[5], 'quarantined' => (int) $data[6],
+            'failed_pending' => (int) $data[5] + (int) $data[6],
+            'quarantined' => $this->failureStore()->count($this->config['prefix'], $queue, 'quarantined'),
+            'quarantined_pending' => (int) $data[6],
             'consumer_count' => (int) $data[7], 'heartbeat_count' => (int) $data[10],
             'consumers' => $consumers, 'next_offset' => $offset + count($consumers) < (int) $data[10] ? $offset + count($consumers) : null,
             'first_pending' => $first === null ? null : ['message_id' => $first[0], 'consumer' => $first[1],
@@ -412,7 +450,8 @@ final class Transport
         $this->archiveFailure($queue, $failureId);
         $deleted = $this->failureStore()->remove($this->config['prefix'], $queue, $failureId,
             function () use ($queue, $failureId): bool {
-                $this->command('XDEL', $this->keys($queue)[5], $failureId);
+                [$key, $id] = $this->failureLocation($queue, $failureId);
+                $this->command('XDEL', $key, $id);
                 return true;
             });
         $this->command('HDEL', $this->keys($queue)[8], $failureId);

@@ -34,7 +34,7 @@ final class Stats extends Command
             $output->writeln(json_encode($stats, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE), Output::OUTPUT_RAW);
             return 0;
         }
-        foreach (['queue', 'group', 'active', 'waiting', 'pending', 'delayed', 'failed', 'failed_pending', 'quarantined', 'consumer_count'] as $key) {
+        foreach (['queue', 'group', 'active', 'waiting', 'pending', 'delayed', 'failed', 'failed_pending', 'quarantined', 'quarantined_pending', 'consumer_count'] as $key) {
             $output->writeln($key . ': ' . $stats[$key], Output::OUTPUT_RAW);
         }
         $output->writeln('消费者心跳与 Pending 详情请使用 --json。');

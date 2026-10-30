@@ -22,7 +22,7 @@ final class Manage extends Command
     protected function configure(): void
     {
         $this->setName('queue:manage')->setDescription('查看和维护失败、隔离记录及消费者')
-            ->addArgument('action', Argument::REQUIRED, 'install、migrate-failed、failed、quarantined、retry、forget、forget-quarantine、prune、cleanup-consumer 或 restart')
+            ->addArgument('action', Argument::REQUIRED, 'install、upgrade、migrate-failed、failed、quarantined、retry、forget、forget-quarantine、prune、cleanup-consumer 或 restart')
             ->addArgument('id', Argument::OPTIONAL, '记录 Stream ID 或消费者名称')
             ->addOption('queue', null, Option::VALUE_REQUIRED, '队列名称')
             ->addOption('start', null, Option::VALUE_REQUIRED, '失败记录起始 ID，支持 (ID', '-')
@@ -43,17 +43,18 @@ final class Manage extends Command
     protected function execute(Input $input, Output $output): int
     {
         $action = $input->getArgument('action');
-        if (!in_array($action, ['install', 'migrate-failed', 'failed', 'quarantined', 'retry', 'forget', 'forget-quarantine', 'prune', 'cleanup-consumer', 'restart'], true)) {
+        if (!in_array($action, ['install', 'upgrade', 'migrate-failed', 'failed', 'quarantined', 'retry', 'forget', 'forget-quarantine', 'prune', 'cleanup-consumer', 'restart'], true)) {
             throw new InvalidArgumentException('未知管理动作。');
         }
-        if ($action === 'install') {
-            $this->app->make(FailedJobStore::class)->install();
-            $output->writeln('失败记录表已创建。');
+        if (in_array($action, ['install', 'upgrade'], true)) {
+            $store = $this->app->make(FailedJobStore::class);
+            $action === 'install' ? $store->install() : $store->upgrade();
+            $output->writeln($action === 'install' ? '失败记录表已创建。' : '失败记录表已升级。');
             return 0;
         }
         $id = $input->getArgument('id');
         if (in_array($action, ['retry', 'forget', 'forget-quarantine'], true) &&
-            (!is_string($id) || !preg_match('/\A\d+-\d+\z/D', $id))) {
+            (!is_string($id) || !preg_match('/\A(?:q:)?\d{1,20}-\d{1,20}\z/D', $id))) {
             throw new InvalidArgumentException('必须指定有效的失败记录 Stream ID。');
         }
         $queue = $this->app->make(Queue::class);
@@ -72,7 +73,7 @@ final class Manage extends Command
             if ($action === 'migrate-failed') {
                 $migrated = $transport->migrateFailed($queueName, $limit);
                 $output->writeln(json_encode(['migrated' => $migrated,
-                    'remaining' => $transport->stats($queueName)['failed_pending']], JSON_THROW_ON_ERROR), Output::OUTPUT_RAW);
+                    'remaining' => $transport->pendingFailures($queueName)], JSON_THROW_ON_ERROR), Output::OUTPUT_RAW);
                 return 0;
             }
             if ($action === 'prune') {

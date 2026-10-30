@@ -1,5 +1,21 @@
 # 变更记录
 
+## 0.5.0 — 2026-10-30
+
+- 普通最终失败与隔离坏消息统一保存在数据库失败表，`failure_kind` 区分 `failed` 和 `quarantined`；`failed` 列表与计数包含两类，`quarantined` 是其中的子集。
+- `error` 改为 MySQL `LONGTEXT` / SQLite `TEXT`，直接显示错误原因。非法 UTF-8 使用替代字符，并在 `error_base64`、`payload_base64` 保留原始字节；新增来源、原消息编号和原始字段快照。
+- 隔离记录使用 `q:` 前缀的失败 ID，避免两个 Redis Stream 的相同 ID 相互覆盖。普通失败 ID 不变；坏消息修复后重新发布，直接重放会明确拒绝。
+- Redis 两类 Stream 仅作待落库暂存，写库成功后即删除；延迟孤立消息、消费端协议错误和旧隔离历史均纳入归档、故障恢复、删除及清理。
+- 新增 `queue:manage upgrade`，幂等升级已有失败表，保留项目自定义主键、字段和历史。SQLite 重建时保留索引、触发器及自增序列。
+- `migrate-failed` 同时迁移两类旧历史；`failed_pending` 为待落库总数，`quarantined_pending` 为其中的隔离待落库数。
+
+### 从 0.4 升级
+
+- 停止旧消费者，执行 `composer require panda-men/think-queue-stream:^0.5`。
+- 如应用需要调整表名，先执行项目表重命名迁移，再执行 `php think queue:manage upgrade`；该命令会补充字段并安全转换旧 BLOB 错误内容。
+- 对各队列执行 `php think queue:manage migrate-failed --queue=队列名 --limit=1000`，重复到 `remaining=0`，然后启动新版消费者。迁移不会执行业务处理器。
+- 新安装使用 `queue:manage install` 创建完整结构；不要混跑 v0.4 和 v0.5 消费者。
+
 ## 0.4.0 — 2026-10-30
 
 - 最终失败历史改存数据库 `failed_jobs` 表，支持 MySQL/MariaDB（InnoDB）和 SQLite，保留原失败 ID、任务参数、错误、尝试次数及失败时间。

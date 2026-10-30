@@ -53,7 +53,8 @@ final class FailedJobStorageTest extends TestCase
         self::assertCount(25, $rows);
         self::assertSame($id, $rows[$failure]['job_id']);
         self::assertSame('1', $rows[$failure]['attempts']);
-        self::assertSame("RuntimeException: 最终错误\xff", $rows[$failure]['error']);
+        self::assertSame('RuntimeException: 最终错误�', $rows[$failure]['error']);
+        self::assertSame("RuntimeException: 最终错误\xff", base64_decode($rows[$failure]['error_base64'], true));
         self::assertSame(24, json_decode($rows[$failure]['payload'], true)['data']['report_id']);
         self::assertGreaterThan(0, (int) $rows[$failure]['failed_at_ms']);
         self::assertSame(25, $this->store->count($this->config['prefix'], 'default'));
@@ -221,6 +222,131 @@ final class FailedJobStorageTest extends TestCase
         $this->redis->hSet($key, '1-0', 'completed-job');
         self::assertNull($this->queue->pop());
         self::assertSame(0, $this->redis->hLen($key));
+    }
+
+    public function testQuarantineUsesSameTableAndPreservesMalformedPayloadBytes(): void
+    {
+        $id = $this->queue->push(SuccessJob::class);
+        $keys = $this->queue->transport()->keys('default');
+        $this->redis->hSet($keys[2], $id, "{损坏\xff");
+        self::assertNull($this->queue->pop());
+        $rows = $this->queue->transport()->failures('default');
+        self::assertCount(1, $rows);
+        $failure = array_key_first($rows);
+        self::assertStringStartsWith('q:', $failure);
+        self::assertSame('quarantined', $rows[$failure]['failure_kind']);
+        self::assertSame("{损坏\xff", $rows[$failure]['payload']);
+        self::assertSame('ready', $rows[$failure]['source']);
+        self::assertNotSame('', $rows[$failure]['message_id']);
+        self::assertNotSame('', $rows[$failure]['error']);
+        self::assertSame(0, $this->redis->xLen($keys[6]));
+        self::assertSame(1, $this->queue->transport()->stats('default')['failed']);
+        self::assertSame(1, $this->queue->transport()->stats('default')['quarantined']);
+        $pdo = FailureDatabase::pdo($this->config['prefix']);
+        $row = $pdo->query('SELECT payload,payload_base64,error FROM failed_jobs')->fetch(PDO::FETCH_ASSOC);
+        self::assertSame('{损坏�', $row['payload']);
+        self::assertSame("{损坏\xff", base64_decode($row['payload_base64'], true));
+    }
+
+    public function testSameStreamIdsCannotOverwriteDifferentFailureKinds(): void
+    {
+        $transport = $this->queue->transport();
+        $keys = $transport->keys('default');
+        $this->redis->xAdd($keys[5], '1-0', ['error' => '业务失败']);
+        $this->redis->xAdd($keys[6], '1-0', ['error' => '协议错误', 'quarantined_at_ms' => '1', 'source' => 'ready']);
+        self::assertSame(2, $transport->migrateFailed('default'));
+        self::assertSame(['1-0', 'q:1-0'], array_keys($transport->failures('default')));
+        self::assertSame(['q:1-0'], array_keys($transport->failures('default', 1, '(1-0')));
+        self::assertSame(['1-0'], array_keys($transport->quarantined('default')));
+        self::assertSame(2, $transport->stats('default')['failed']);
+        self::assertSame(0, $transport->pendingFailures('default'));
+        try {
+            $transport->retryFailed('default', 'q:1-0');
+            self::fail('格式损坏的消息不能直接重放。');
+        } catch (\InvalidArgumentException) {
+            self::assertSame(2, $transport->stats('default')['failed']);
+        }
+        self::assertSame(['q:1-0'], $transport->prune('default', 'quarantined', 60));
+        self::assertTrue($transport->forgetQuarantined('default', '1-0'));
+        self::assertSame(['1-0'], array_keys($transport->failures('default')));
+    }
+
+    public function testQuarantineDatabaseOutageStopsConsumptionAndRecovers(): void
+    {
+        $store = new FailedJobStore(new PDO('sqlite::memory:'));
+        $queue = $this->newQueue([], $store);
+        $id = $queue->push(SuccessJob::class);
+        $next = $queue->push(SuccessJob::class);
+        $keys = $queue->transport()->keys('default');
+        $this->redis->hSet($keys[2], $id, '{bad');
+        try {
+            $queue->pop();
+            self::fail('坏消息归档失败时必须停止领取后续正常任务。');
+        } catch (FailureStorageException) {
+            self::assertSame(1, $this->redis->xLen($keys[6]));
+            self::assertSame(1, $queue->size());
+        }
+        $store->install();
+        self::assertSame($next, $queue->pop()->getJobId());
+        self::assertSame(1, $store->count($this->config['prefix'], 'default', 'quarantined'));
+        self::assertSame(0, $this->redis->xLen($keys[6]));
+    }
+
+    public function testInvalidOversizedJobIdStillArchivesAsFailure(): void
+    {
+        $keys = $this->queue->transport()->keys('default');
+        $this->redis->xAdd($keys[0], '*', ['job_id' => str_repeat('invalid', 100)]);
+        self::assertNull($this->queue->pop());
+        $rows = $this->queue->transport()->failures('default');
+        self::assertCount(1, $rows);
+        self::assertSame('', array_values($rows)[0]['job_id']);
+        self::assertStringContainsString(str_repeat('invalid', 100), array_values($rows)[0]['raw_entry']);
+    }
+
+    public function testLegacyBlobUpgradePreservesDataAndCustomPrimaryKey(): void
+    {
+        $pdo = FailureDatabase::pdo($this->config['prefix']);
+        $mysql = $pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql';
+        $table = 'legacy_failed_' . bin2hex(random_bytes(4));
+        $pdo->exec('CREATE TABLE ' . $table . ' (id ' . ($mysql ? 'BIGINT PRIMARY KEY AUTO_INCREMENT' : 'INTEGER PRIMARY KEY AUTOINCREMENT') .
+            ', scope VARCHAR(64) NOT NULL, failure_id VARCHAR(41) NOT NULL, sort_id CHAR(41) NOT NULL,' .
+            ' prefix TEXT NOT NULL, queue VARCHAR(100) NOT NULL, job_id VARCHAR(128) NOT NULL, payload TEXT NOT NULL,' .
+            ' attempts INTEGER NOT NULL, error BLOB NOT NULL, failed_at_ms BIGINT NOT NULL, custom_field INTEGER DEFAULT 77,' .
+            ' UNIQUE(scope,failure_id))' . ($mysql ? ' ENGINE=InnoDB AUTO_INCREMENT=10000 DEFAULT CHARSET=utf8mb4' : ''));
+        if (!$mysql) $pdo->exec("INSERT INTO sqlite_sequence (name,seq) VALUES ('" . $table . "',9999)");
+        $insert = $pdo->prepare('INSERT INTO ' . $table . ' (scope,failure_id,sort_id,prefix,queue,job_id,payload,attempts,error,failed_at_ms)' .
+            ' VALUES (?,?,?,?,?,?,?,?,?,?)');
+        $insert->execute([hash('sha256', $this->config['prefix'] . "\0default"), '1-0', str_repeat('0', 19) . '1-' . str_repeat('0', 20),
+            $this->config['prefix'], 'default', 'old-job', '{}', 3, "旧错误\xff", 1]);
+        $insert->closeCursor();
+        if (!$mysql) {
+            $pdo->exec('PRAGMA foreign_keys=ON');
+            $pdo->exec('CREATE TABLE ' . $table . '_reference (id INTEGER PRIMARY KEY, failure_id INTEGER REFERENCES ' . $table . '(id) ON DELETE CASCADE)');
+            $pdo->exec('INSERT INTO ' . $table . '_reference VALUES (1,10000)');
+        }
+        try {
+            $store = new FailedJobStore($pdo, $table);
+            $store->upgrade();
+            $store->upgrade();
+            $row = $pdo->query('SELECT * FROM ' . $table)->fetch(PDO::FETCH_ASSOC);
+            self::assertSame(10000, (int) $row['id']);
+            self::assertSame(77, (int) $row['custom_field']);
+            self::assertSame('旧错误�', $row['error']);
+            self::assertSame("旧错误\xff", base64_decode($row['error_base64'], true));
+            self::assertSame('failed', $row['failure_kind']);
+            if (!$mysql) {
+                self::assertSame(1, (int) $pdo->query('SELECT COUNT(*) FROM ' . $table . '_reference')->fetchColumn());
+                self::assertSame(1, (int) $pdo->query('PRAGMA foreign_keys')->fetchColumn());
+            }
+            $store->archive($this->config['prefix'], 'default', 'q:1-0', ['error' => '坏消息'], static fn (): bool => true);
+            self::assertSame(2, $store->count($this->config['prefix'], 'default'));
+            $columns = $pdo->query($mysql ? 'SHOW COLUMNS FROM ' . $table : 'PRAGMA table_info(' . $table . ')')->fetchAll(PDO::FETCH_ASSOC);
+            $columns = array_column($columns, null, $mysql ? 'Field' : 'name');
+            self::assertSame($mysql ? 'longtext' : 'TEXT', $columns['error'][$mysql ? 'Type' : 'type']);
+        } finally {
+            if (!$mysql) $pdo->exec('DROP TABLE ' . $table . '_reference');
+            $pdo->exec('DROP TABLE ' . $table);
+        }
     }
 
     public function testServiceUsesConfiguredConnectionAndCommitsOutsideBusinessTransaction(): void

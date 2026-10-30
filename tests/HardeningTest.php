@@ -206,7 +206,7 @@ final class HardeningTest extends TestCase
         $this->queue->push(SuccessJob::class);
         $this->queue->later(60, SuccessJob::class);
         $stats = $transport->stats('default', 1);
-        foreach (['active' => 3, 'waiting' => 1, 'pending' => 1, 'delayed' => 1, 'failed' => 1, 'quarantined' => 1] as $name => $value) {
+        foreach (['active' => 3, 'waiting' => 1, 'pending' => 1, 'delayed' => 1, 'failed' => 2, 'quarantined' => 1] as $name => $value) {
             self::assertSame($value, $stats[$name], $name);
         }
         self::assertTrue($stats['counts_consistent']);

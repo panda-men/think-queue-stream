@@ -35,6 +35,13 @@ final class FailedJobStore
         $this->database()->exec(str_replace('{{table}}', $this->table, $sql));
     }
 
+    /** 显式升级 v0.4 表结构和错误文本，保留已有数据、主键及附加字段。 */
+    public function upgrade(): void
+    {
+        $this->install();
+        (new FailedJobSchema($this->database(), $this->table))->upgrade();
+    }
+
     /**
      * 幂等归档；在行锁内重新确认待归档记录，防止过期的迁移进程复活已删除的历史。
      * 数据库提交后，调用方才能删除 Redis 待落库记录。
@@ -47,22 +54,34 @@ final class FailedJobStore
         $this->transaction(function () use ($prefix, $queue, $id, $record, $pending, $sort, $scope): bool {
             $mysql = $this->database()->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql';
             // 唯一键上的幂等写入先获取行锁，避免并发归档对不存在的行先读后插造成锁升级死锁。
+            $kind = str_starts_with($id, 'q:') ? 'quarantined' : 'failed';
+            [$payload, $payloadBytes] = $this->text($record['payload'] ?? '');
+            [$error, $errorBytes] = $this->text($record['error'] ?? '');
+            [$jobId] = $this->text($record['job_id'] ?? '');
+            if ($kind === 'quarantined' && !Payload::validId($jobId)) $jobId = '';
+            [$raw] = $this->text($record['raw_entry'] ?? '');
             $this->execute(($mysql ? 'INSERT INTO ' : 'INSERT OR IGNORE INTO ') . $this->quotedTable .
-                ' (scope, failure_id, sort_id, prefix, queue, job_id, payload, attempts, error, failed_at_ms)' .
-                ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)' . ($mysql ? ' ON DUPLICATE KEY UPDATE failure_id = failure_id' : ''),
-                [$scope, $id, $sort, $prefix, $queue, $record['job_id'] ?? '', $record['payload'] ?? '',
-                    (int) ($record['attempts'] ?? 0), $record['error'] ?? '',
-                    (int) ($record['failed_at_ms'] ?? explode('-', $id)[0])]);
+                ' (scope, failure_id, sort_id, failure_kind, prefix, queue, job_id, payload, attempts, error, failed_at_ms,' .
+                ' source, message_id, raw_entry, payload_base64, error_base64)' .
+                ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)' . ($mysql ? ' ON DUPLICATE KEY UPDATE failure_id = failure_id' : ''),
+                [$scope, $id, $sort, $kind, $prefix, $queue, $jobId, $payload,
+                    (int) ($record['attempts'] ?? 0), $error,
+                    (int) ($record['failed_at_ms'] ?? $record['quarantined_at_ms'] ?? explode('-', ltrim($id, 'q:'))[0]),
+                    $record['source'] ?? '', $record['message_id'] ?? '', $raw, $payloadBytes, $errorBytes]);
             // Redis 暂存已被重放/删除时，回滚本次可能新插入的记录，禁止复活旧历史。
             return $pending();
         }, true);
     }
 
     /** @return array<string,array<string,string>> 按失败记录 ID 分页 */
-    public function records(string $prefix, string $queue, int $limit, string $start): array
+    public function records(string $prefix, string $queue, int $limit, string $start, ?string $kind = null): array
     {
         $where = 'scope = ?';
         $values = [$this->scope($prefix, $queue)];
+        if ($kind !== null) {
+            $where .= ' AND failure_kind = ?';
+            $values[] = $kind;
+        }
         if ($start !== '-') {
             $exclusive = str_starts_with($start, '(');
             $where .= ' AND sort_id ' . ($exclusive ? '>' : '>=') . ' ?';
@@ -94,27 +113,31 @@ final class FailedJobStore
         return $this->find($this->scope($prefix, $queue), $id) !== null;
     }
 
-    public function count(string $prefix, string $queue): int
+    public function count(string $prefix, string $queue, ?string $kind = null): int
     {
-        return (int) $this->execute('SELECT COUNT(*) FROM ' . $this->quotedTable . ' WHERE scope = ?',
-            [$this->scope($prefix, $queue)])->fetchColumn();
+        return (int) $this->execute('SELECT COUNT(*) FROM ' . $this->quotedTable . ' WHERE scope = ?' .
+            ($kind === null ? '' : ' AND failure_kind = ?'),
+            $kind === null ? [$this->scope($prefix, $queue)] : [$this->scope($prefix, $queue), $kind])->fetchColumn();
     }
 
     /** @return list<string> 按失败时间选择有界清理候选 */
-    public function older(string $prefix, string $queue, int $beforeMs, int $limit): array
+    public function older(string $prefix, string $queue, int $beforeMs, int $limit, ?string $kind = null): array
     {
         return $this->execute('SELECT failure_id FROM ' . $this->quotedTable .
-            ' WHERE scope = ? AND failed_at_ms < ? ORDER BY failed_at_ms, sort_id LIMIT ' . $limit,
-            [$this->scope($prefix, $queue), $beforeMs])->fetchAll(PDO::FETCH_COLUMN);
+            ' WHERE scope = ? AND failed_at_ms < ?' . ($kind === null ? '' : ' AND failure_kind = ?') .
+            ' ORDER BY failed_at_ms, sort_id LIMIT ' . $limit,
+            $kind === null ? [$this->scope($prefix, $queue), $beforeMs] :
+                [$this->scope($prefix, $queue), $beforeMs, $kind])->fetchAll(PDO::FETCH_COLUMN);
     }
 
     /** Stream ID 补齐后按字符串排序，避免 10-0 排到 2-0 前面。 */
     private static function sortId(string $id): string
     {
-        if (!preg_match('/\A(\d{1,20})-(\d{1,20})\z/D', $id, $parts)) {
+        if (!preg_match('/\A(q:)?(\d{1,20})-(\d{1,20})\z/D', $id, $parts)) {
             throw new InvalidArgumentException('失败记录 ID 必须为有效的 Stream ID。');
         }
-        return str_pad($parts[1], 20, '0', STR_PAD_LEFT) . '-' . str_pad($parts[2], 20, '0', STR_PAD_LEFT);
+        return str_pad($parts[2], 20, '0', STR_PAD_LEFT) . '-' . str_pad($parts[3], 20, '0', STR_PAD_LEFT) .
+            ($parts[1] === '' ? '' : 'q');
     }
 
     private function scope(string $prefix, string $queue): string
@@ -134,7 +157,21 @@ final class FailedJobStore
     {
         $result = [];
         foreach (['job_id', 'payload', 'attempts', 'error', 'failed_at_ms'] as $key) $result[$key] = (string) $row[$key];
+        foreach (['failure_kind', 'source', 'message_id', 'raw_entry'] as $key) $result[$key] = (string) ($row[$key] ?? '');
+        foreach (['payload_base64', 'error_base64'] as $key) {
+            if ($row[$key] !== null) $result[$key] = (string) $row[$key];
+        }
+        if (isset($result['payload_base64'])) $result['payload'] = base64_decode($result['payload_base64'], true);
+        if ($result['failure_kind'] === 'quarantined') $result['quarantined_at_ms'] = $result['failed_at_ms'];
         return $result;
+    }
+
+    /** 可读文本使用替代字符处理非法 UTF-8，同时保存原始字节的 Base64 副本。 */
+    private function text(string $value): array
+    {
+        if (preg_match('//u', $value) === 1) return [$value, null];
+        return [json_decode(json_encode($value, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE), true,
+            512, JSON_THROW_ON_ERROR), base64_encode($value)];
     }
 
     private function execute(string $sql, array $values): \PDOStatement
