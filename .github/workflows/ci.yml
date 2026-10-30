@@ -11,6 +11,17 @@ jobs:
         php: ['8.2', '8.3', '8.4']
         redis: ['6.2', '7.4']
     services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: queue-test
+          MYSQL_DATABASE: queue_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h127.0.0.1 -pqueue-test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
       redis:
         image: redis:${{ matrix.redis }}-alpine
         ports: ['6379:6379']
@@ -24,10 +35,17 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: redis, pcntl, mbstring, dom, xml, xmlwriter
+          extensions: redis, pcntl, mbstring, dom, xml, xmlwriter, pdo_mysql, pdo_sqlite
           coverage: none
           tools: composer:v2
       - run: composer validate --strict
       - run: composer install --prefer-dist --no-interaction
       - run: composer lint
       - run: composer test
+      - run: composer test
+        env:
+          QUEUE_TEST_DB_HOST: 127.0.0.1
+          QUEUE_TEST_DB_PORT: 3306
+          QUEUE_TEST_DB_NAME: queue_test
+          QUEUE_TEST_DB_USER: root
+          QUEUE_TEST_DB_PASSWORD: queue-test
