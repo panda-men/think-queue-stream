@@ -25,6 +25,21 @@ return [
     // 未显式指定队列时使用的默认队列名；不是只允许消费这一个队列。
     'queue' => 'default',
 
+    // 多队列主进程配置；宝塔只需守护 php think queue:supervise，主进程保持前台运行。
+    'supervisor' => [
+        // 队列名称 => Worker 配置；空数组不启动 Worker，processes=0 可暂停指定队列。
+        // 示例：'mail' => ['processes' => 2, 'tries' => 3, 'timeout' => 60, 'memory' => 128]。
+        // 可选参数：delay=3、max_jobs=1000、max_time=3600，与 queue:work 含义一致。
+        'workers' => [],
+        // 所有队列 Worker 的总并发上限，包含重载时正在退出的旧 Worker。
+        'max_processes' => 32,
+        // 优雅停止等待秒数，超时后 SIGKILL；应大于最长任务 timeout 和一次阻塞读取耗时之和。
+        'stop_wait_seconds' => 120,
+        // 子进程退出后首次重启等待秒数；连续异常退出指数退避，稳定运行 30 秒后重置。
+        'restart_delay' => 1,
+        'restart_max_delay' => 30,
+    ],
+
     // 最终失败记录使用的应用数据库连接名；null 沿用 database.default，使用独立 PDO 事务。
     'failed_connection' => null,
     // 完整失败表名，不自动添加应用数据库表前缀；部署时执行 queue:manage install 创建。

@@ -57,13 +57,14 @@ final class Work extends Command
         $queue = $this->app->make(Queue::class);
         $monitor = $this->app->make(Monitor::class);
         $worker = new Worker($queue, null, $monitor);
-        $queueName = $input->getOption('queue') ?: $queue->defaultQueue();
+        $queueName = $input->getOption('queue');
+        if ($queueName === null || $queueName === '') $queueName = $queue->defaultQueue();
         $transport = $queue->transport();
         $restart = $transport->restartToken();
         $start = hrtime(true);
         $processed = 0;
         $stop = false;
-        $reason = 'exception';
+        $reason = 'signal';
         $previousOutput = $monitor->setOutput(static function (string $line) use ($output): void {
             $output->writeln($line, Output::OUTPUT_RAW);
         });
@@ -75,8 +76,10 @@ final class Work extends Command
         pcntl_signal(SIGTERM, $stopHandler);
         pcntl_signal(SIGINT, $stopHandler);
         try {
-            do {
+            while (!$stop) {
                 $this->app->event->trigger(new Looping($queue, $queueName, (bool) $input->getOption('once')));
+                // 循环事件可能执行维护或补投；其间收到停止信号后不再领取新任务。
+                if ($stop) { $reason = 'signal'; break; }
                 if ($worker->runNextJob($queueName, $options['tries'], $options['timeout'], $options['delay'])) {
                     $processed++;
                 } elseif ($transport->blockMilliseconds() === 0) {
@@ -92,7 +95,7 @@ final class Work extends Command
                     default => '',
                 };
                 if ($reason !== '') break;
-            } while (!$stop);
+            }
         } catch (\Throwable $exception) {
             $reason = 'exception';
             $monitor->record('error', $queueName, ['consumer' => $transport->consumerName()] + DiagnosticContext::exception($exception));

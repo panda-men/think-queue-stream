@@ -3,7 +3,7 @@
 面向 **PHP 8.2+、ThinkPHP 8** 的 Redis Streams 任务队列。沿用 think-queue 的
 `push/later`、`fire`、`delete/release` 使用习惯，重新实现传输和消费者。
 
-当前版本为 **v0.5.0**，版本记录和升级说明见 [CHANGELOG](CHANGELOG.md)，发布说明见
+当前版本为 **v0.6.0**，版本记录和升级说明见 [CHANGELOG](CHANGELOG.md)，发布说明见
 [GitHub Releases](https://github.com/panda-men/think-queue-stream/releases)。具体业务仍需完成部署环境验收。
 
 ## 环境要求
@@ -56,10 +56,10 @@ final class ReportNotFound extends \RuntimeException implements ProvidesFailureC
 
 ## 安装与接入
 
-包名：`panda-men/think-queue-stream`。安装 v0.5 系列：
+包名：`panda-men/think-queue-stream`。安装 v0.6 系列：
 
 ```bash
-composer require panda-men/think-queue-stream:^0.5
+composer require panda-men/think-queue-stream:^0.6
 ```
 
 如果所用 Composer 仓库尚未收录该包，可在项目的 `composer.json` 添加 VCS 仓库，
@@ -338,6 +338,97 @@ php think queue:manage prune --queue=exports --kind=quarantined \
 # 将名称替换为 stats 输出的真实消费者名称；不会强制结束进程或删除待执行任务。
 php think queue:manage cleanup-consumer '统计返回的消费者名称' --queue=exports --idle-ms=300000
 ```
+
+### 多队列主进程与宝塔部署
+
+`queue:supervise` 在前台统一管理当前项目的多个 `queue:work` 子进程。每个 Worker
+连续执行本队列的任务；新增 Job 类可以复用已有队列。每个子进程都用当前 `PHP_BINARY`
+重新执行应用根目录的 `think`，独立初始化应用及 Redis、数据库连接。
+
+在**业务应用**的 `config/queue_streams.php` 中添加或合并以下配置；已有配置文件不会自动追加新字段：
+
+```php
+'supervisor' => [
+    'workers' => [
+        'mail' => ['processes' => 2, 'tries' => 3, 'timeout' => 60, 'memory' => 128],
+        'sync' => ['processes' => 3, 'tries' => 5, 'timeout' => 60, 'memory' => 256],
+        'finance' => ['processes' => 1, 'timeout' => 60],
+    ],
+    'max_processes' => 32,
+    'stop_wait_seconds' => 120,
+    'restart_delay' => 1,
+    'restart_max_delay' => 30,
+],
+```
+
+`workers` 的键必须与生产者投递时指定的队列名一致。每个队列允许配置 `processes`、
+`tries`、`timeout`、`delay`、`memory`、`max_jobs`、`max_time`，默认分别为
+`1`、`3`、`60`、`3`、`128`、`1000`、`3600`，含义与下方 Worker 命令选项相同。
+`processes=0` 暂停指定队列，空 `workers` 表示不启动任何 Worker，主进程仍然运行。
+模板默认 `workers=[]`，请先配置实际队列。未知配置项、非法队列名、超出总并发、
+`timeout * 1000 >= retry_after_ms` 等配置会被拒绝。
+
+在应用根目录执行：
+
+```bash
+# 启动唯一主进程，自动启动配置中的全部 Worker。
+php think queue:supervise
+
+# 修改配置后，在另一个终端通知现有主进程重载；主进程 PID 保持不变。
+php think queue:supervise --reload
+```
+
+重载会从磁盘重新读取 `config/queue_streams.php`，完整校验成功后通知全部旧 Worker
+完成当前任务并退出，再按最新参数补齐 Worker。新增、删除队列和调整并发均可通过此方式生效。
+正在退出的 Worker 计入总并发和所属队列预算；缩容时先等待已有 Worker 退出。
+单个队列并发增加时也要遵守 `max_processes`。新配置无效或 PHP 语法错误时保留现有 Worker，
+主进程日志输出“配置重载失败”；修复后重新发起请求即可。`--reload` 成功表示请求已提交，
+最终结果以主进程日志为准。也可以向主进程发送 `SIGHUP` 重载。
+若配置文件有 PHP 语法错误，新启动的 ThinkPHP CLI 可能在执行 `--reload` 前就无法完成初始化；
+此时使用 `SIGHUP` 可验证主进程拒绝错误配置，或先修复文件再执行 `--reload`。
+
+Worker 达到任务数、内存、运行时间上限，收到已有 `queue:manage restart` 标记，
+或者发生硬超时、异常退出时，主进程都会自动补齐。首次等待 `restart_delay` 秒，
+连续异常退出按指数退避，最多 `restart_max_delay` 秒；正常退出或稳定运行至少 30 秒后重置退避。
+启动进程失败也会退避重试，不影响其他已运行的 Worker。
+
+宝塔只需新增**一个**守护项（将路径替换为部署环境的实际值）：
+
+```ini
+[program:queue-streams]
+directory=/www/wwwroot/your-project
+command=/www/server/php/84/bin/php /www/wwwroot/your-project/think queue:supervise
+user=www
+numprocs=1
+autostart=true
+autorestart=true
+stopsignal=TERM
+stopwaitsecs=150
+stopasgroup=true
+killasgroup=true
+redirect_stderr=true
+stdout_logfile=/www/wwwroot/your-project/runtime/queue-supervise.log
+stdout_logfile_maxbytes=20MB
+stdout_logfile_backups=5
+```
+
+在宝塔界面填写相同的工作目录、启动命令、运行用户和进程数量，并核对生成的配置。
+运行用户需要读写应用 `runtime/`。启动前先停止原有的各队列守护项，避免同时消费导致并发超出预期。
+CLI 需要启用 `pcntl`，并允许 `proc_open`、`proc_get_status`、`proc_terminate`、`proc_close`
+以及 `pcntl_async_signals`、`pcntl_signal`、`pcntl_signal_get_handler`、`pcntl_alarm`。
+主进程会在启动 Worker 前检查这些函数，被禁用时明确报错退出。
+主进程通过 `runtime/queue-streams-supervisor.pid` 的文件锁限制同一项目只启动一个实例；
+退出后保留文件，是否运行以锁为准，无需手工删除。重载请求写入同目录的 `.pid.reload` 文件，
+不额外要求 `posix` 扩展。Worker 标准输出、错误输出直接交由主进程的守护项收集。
+
+`SIGTERM` / `SIGINT` 会停止补齐并通知全部 Worker 优雅退出。等待超过 `stop_wait_seconds`
+的 Worker 将被 `SIGKILL`，未确认任务由队列后续接管；业务仍需幂等。
+该等待时间应大于最长任务硬超时与一次阻塞读取耗时之和，宝塔的 `stopwaitsecs`
+应再留出余量。保留 `stopasgroup` / `killasgroup`，以便外部强制停止时同时清理子进程。
+
+重载适用于此配置文件和 Worker 业务代码。修改 `.env`、入口、服务注册等启动环境时应重启主进程；
+使用 ThinkPHP 配置缓存时，先重新生成应用配置缓存，再执行重载，确保新 Worker 读取的配置也已更新。
+`SIGKILL` 无法执行主进程清理逻辑，外部进程管理器应负责清理整个进程组。
 
 ### 消费者参数
 
