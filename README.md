@@ -569,10 +569,12 @@ Lua 使用 `EVALSHA`，只有明确的 `NOSCRIPT` 才加载并重发；连接超
 原包读取 `config/queue.php`，本包读取 `config/queue_streams.php`。
 如果原包也把失败任务存入数据库，请为本包配置独立的 `failed_table`，例如 `queue_streams_failed_jobs`。
 
-按业务迁移时，先启动对应的 Streams Worker，再将该批任务的生产者和处理器切到
-`ThinkQueue\Streams\Facade\Queue`、`ThinkQueue\Streams\Job`。旧 Worker 继续消费已经
-投递的任务，等待就绪、延迟和处理中任务全部处理完毕后再停。原包的 `CallQueuedHandler`、
-PHP 对象序列化、Database/Sync 驱动、Redis List 数据和失败历史需要按业务另行处理。
+按业务迁移时，为 Streams 新建使用 `ThinkQueue\Streams\Job` 的处理器。新旧处理器可以
+调用同一个业务服务。先启动对应的 Streams Worker，再把该批任务的生产者切到
+`ThinkQueue\Streams\Facade\Queue`。保留旧处理器及其参数签名，让旧 Worker 继续消费已经
+投递的任务。确认旧队列的就绪、延迟和处理中任务全部清空后，再停掉相应的旧 Worker。
+原包的 `CallQueuedHandler`、PHP 对象序列化、Database/Sync 驱动、Redis List 数据和失败历史
+需要按业务另行处理。
 
 只实现一个消费组的任务队列，不承诺严格执行顺序、恰好一次业务执行或广播语义。
 
