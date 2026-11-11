@@ -12,9 +12,11 @@ use ThinkQueue\Streams\Supervisor;
 
 final class Supervise extends Command
 {
+    public const NAME = 'stream:supervise';
+
     protected function configure(): void
     {
-        $this->setName('queue:supervise')->setDescription('统一管理多队列 Worker，支持自动重启与配置重载')
+        $this->setName(self::NAME)->setDescription('统一管理多队列 Worker，支持自动重启与配置重载')
             ->addOption('reload', null, Option::VALUE_NONE, '通知当前项目主进程重新读取配置并更新 Worker');
     }
 
@@ -24,7 +26,7 @@ final class Supervise extends Command
             return $this->supervise($input, $output);
         } catch (RuntimeException $exception) {
             // ThinkPHP 的异常终端渲染也使用 proc_close；直接输出可报告被禁用的进程函数。
-            $output->writeln('queue:supervise: ' . $exception->getMessage(), Output::OUTPUT_RAW);
+            $output->writeln(self::NAME . ': ' . $exception->getMessage(), Output::OUTPUT_RAW);
             return 1;
         }
     }

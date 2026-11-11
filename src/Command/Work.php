@@ -16,6 +16,8 @@ use ThinkQueue\Streams\Worker;
 
 final class Work extends Command
 {
+    public const NAME = 'stream:work';
+
     /**
      * 定义消费者选项，所有数字在执行边界统一验证和转换。
      *
@@ -23,7 +25,7 @@ final class Work extends Command
      */
     protected function configure(): void
     {
-        $this->setName('queue:work')->setDescription('消费 Redis Streams 任务')
+        $this->setName(self::NAME)->setDescription('消费 Redis Streams 任务')
             ->addOption('queue', null, Option::VALUE_REQUIRED, '队列名称')
             ->addOption('once', null, Option::VALUE_NONE, '只领取一次')
             ->addOption('tries', null, Option::VALUE_REQUIRED, '最大领取次数', 3)
@@ -52,7 +54,7 @@ final class Work extends Command
             $options[$name] = $value;
         }
         if (!extension_loaded('pcntl')) {
-            throw new \RuntimeException('queue:work 要求 pcntl 扩展。');
+            throw new \RuntimeException(self::NAME . ' 要求 pcntl 扩展。');
         }
         $queue = $this->app->make(Queue::class);
         $monitor = $this->app->make(Monitor::class);

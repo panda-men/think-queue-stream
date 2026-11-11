@@ -239,8 +239,8 @@ if (in_array($argv[1], ['retry-failure', 'migrate-failures'], true)) {
             $events[] = $event->once;
             if (!$event->once) $event->queue->push(\ThinkQueue\Streams\Tests\Fixtures\LifecycleJob::class);
         });
-    $work = $app->console->call('queue:work', ['--max-jobs=1', '--timeout=1'])->fetch();
-    $once = $app->console->call('queue:work', ['--once', '--timeout=1'])->fetch();
+    $work = $app->console->call('stream:work', ['--max-jobs=1', '--timeout=1'])->fetch();
+    $once = $app->console->call('stream:work', ['--once', '--timeout=1'])->fetch();
     $id = QueueFacade::push(\ThinkQueue\Streams\Tests\Fixtures\LifecycleJob::class);
     echo json_encode(compact('work', 'once', 'events', 'id', 'restored'), JSON_THROW_ON_ERROR);
 } elseif ($argv[1] === 'commands') {
@@ -254,28 +254,32 @@ if (in_array($argv[1], ['retry-failure', 'migrate-failures'], true)) {
     $service->boot();
     QueueFacade::push(ThrowingJob::class, ['counter' => $config['prefix'] . ':counter']);
     $console = $app->console;
-    $console->call('queue:manage', ['install']);
-    $workOutput = $console->call('queue:work', ['--once', '--delay=0', '--timeout=1', '--tries=1'])->fetch();
-    $record = json_decode(trim($console->call('queue:manage', ['failed', '--limit=1'])->fetch()), true, 512, JSON_THROW_ON_ERROR);
-    $console->call('queue:manage', ['retry', $record['failure_id']]);
-    $console->call('queue:manage', ['restart']);
-    $stats = json_decode($console->call('queue:stats', ['--json'])->fetch(), true, 512, JSON_THROW_ON_ERROR);
-    $preview = json_decode($console->call('queue:manage', ['prune', '--older-than=86400', '--dry-run'])->fetch(), true, 512, JSON_THROW_ON_ERROR);
+    $console->call('stream:manage', ['install']);
+    $workOutput = $console->call('stream:work', ['--once', '--delay=0', '--timeout=1', '--tries=1'])->fetch();
+    $record = json_decode(trim($console->call('stream:manage', ['failed', '--limit=1'])->fetch()), true, 512, JSON_THROW_ON_ERROR);
+    $console->call('stream:manage', ['retry', $record['failure_id']]);
+    $console->call('stream:manage', ['restart']);
+    $stats = json_decode($console->call('stream:stats', ['--json'])->fetch(), true, 512, JSON_THROW_ON_ERROR);
+    $preview = json_decode($console->call('stream:manage', ['prune', '--older-than=86400', '--dry-run'])->fetch(), true, 512, JSON_THROW_ON_ERROR);
     $bad = QueueFacade::push(ThrowingJob::class, [], 'invalid');
     $transport = QueueFacade::transport();
     $redis->hSet($transport->keys('invalid')[2], $bad, 'invalid-json');
     QueueFacade::pop('invalid');
-    $quarantined = json_decode(trim($console->call('queue:manage', ['quarantined', '--queue=invalid'])->fetch()), true, 512, JSON_THROW_ON_ERROR);
+    $quarantined = json_decode(trim($console->call('stream:manage', ['quarantined', '--queue=invalid'])->fetch()), true, 512, JSON_THROW_ON_ERROR);
     $consumer = $transport->stats('invalid')['consumers'][0]['name'];
     $redis->zAdd($transport->keys('invalid')[7], (time() - 1000) * 1000, $consumer);
-    $cleanup = $console->call('queue:manage', ['cleanup-consumer', $consumer, '--queue=invalid', '--idle-ms=300000'])->fetch();
-    $console->call('queue:manage', ['forget-quarantine', $quarantined['quarantine_id'], '--queue=invalid']);
+    $cleanup = $console->call('stream:manage', ['cleanup-consumer', $consumer, '--queue=invalid', '--idle-ms=300000'])->fetch();
+    $console->call('stream:manage', ['forget-quarantine', $quarantined['quarantine_id'], '--queue=invalid']);
     $redis->xAdd($transport->keys('history')[5], '1-0', ['error' => 'old']);
-    $migration = json_decode($console->call('queue:manage', ['migrate-failed', '--queue=history', '--limit=1'])->fetch(), true, 512, JSON_THROW_ON_ERROR);
-    $pruned = json_decode($console->call('queue:manage', ['prune', '--queue=history', '--older-than=86400'])->fetch(), true, 512, JSON_THROW_ON_ERROR);
+    $migration = json_decode($console->call('stream:manage', ['migrate-failed', '--queue=history', '--limit=1'])->fetch(), true, 512, JSON_THROW_ON_ERROR);
+    $pruned = json_decode($console->call('stream:manage', ['prune', '--queue=history', '--older-than=86400'])->fetch(), true, 512, JSON_THROW_ON_ERROR);
+    $legacyCommands = array_values(array_filter(
+        ['queue:work', 'queue:supervise', 'queue:stats', 'queue:manage'],
+        [$console, 'hasCommand'],
+    ));
     echo json_encode(['work_output' => $workOutput, 'record' => $record,
         'failures_after_retry' => count(QueueFacade::transport()->failures('default')),
         'restart_token' => QueueFacade::transport()->restartToken(), 'stats' => $stats, 'prune' => $preview,
         'quarantined' => $quarantined, 'quarantined_after_forget' => count($transport->quarantined('invalid')),
-        'cleanup' => $cleanup, 'pruned' => $pruned, 'migration' => $migration], JSON_THROW_ON_ERROR);
+        'cleanup' => $cleanup, 'pruned' => $pruned, 'migration' => $migration, 'legacy_commands' => $legacyCommands], JSON_THROW_ON_ERROR);
 }

@@ -3,7 +3,7 @@
 面向 **PHP 8.2+、ThinkPHP 8** 的 Redis Streams 任务队列。沿用 think-queue 的
 `push/later`、`fire`、`delete/release` 使用习惯，重新实现传输和消费者。
 
-当前版本为 **v0.6.0**，版本记录和升级说明见 [CHANGELOG](CHANGELOG.md)，发布说明见
+当前版本为 **v0.7.0**，版本记录和升级说明见 [CHANGELOG](CHANGELOG.md)，发布说明见
 [GitHub Releases](https://github.com/panda-men/think-queue-stream/releases)。具体业务仍需完成部署环境验收。
 
 ## 环境要求
@@ -16,7 +16,7 @@
 
 ## 运行日志与循环事件
 
-`queue:work` 默认显示启动、领取、成功、主动重投、重试、最终失败、处理权丢失和退出日志。每行包含毫秒时间及时区、队列名称、PID；消费日志还包含实际消费者名称、任务 ID、Stream 消息 ID、类名@方法、尝试次数和耗时。重投日志包含实际延迟秒数，退出日志包含原因和本进程统计。异常重试标签直接显示序号，例如 `[重试 第1次/最多2次]`，并带有 `retry_number=1 max_retries=2`；`max_tries=3` 包含首次执行，因此最多重试 2 次。该序号表示本次失败后已安排的下一次重试，原 `attempt` 仍表示刚刚执行的领取次数；主动重投和崩溃接管也会占用相同的尝试预算。
+`stream:work` 默认显示启动、领取、成功、主动重投、重试、最终失败、处理权丢失和退出日志。每行包含毫秒时间及时区、队列名称、PID；消费日志还包含实际消费者名称、任务 ID、Stream 消息 ID、类名@方法、尝试次数和耗时。重投日志包含实际延迟秒数，退出日志包含原因和本进程统计。异常重试标签直接显示序号，例如 `[重试 第1次/最多2次]`，并带有 `retry_number=1 max_retries=2`；`max_tries=3` 包含首次执行，因此最多重试 2 次。该序号表示本次失败后已安排的下一次重试，原 `attempt` 仍表示刚刚执行的领取次数；主动重投和崩溃接管也会占用相同的尝试预算。
 
 日志通过 `params` 记录完整的任务参数 JSON，所有字段名和值都直接输出，包括密码、令牌、正文和收件人。参数不按白名单筛选，不设置日志字节数、字符串长度、嵌套层数、节点数或字段数上限，其他日志字段也完整输出。`log_parameter_keys`、`log_parameter_max_bytes` 已移除，不再生成 `params_truncated`。换行和控制字符按 JSON 转义，非法 UTF-8 使用替代字符；不能编码的值采用 JSON 部分输出，编码器抛出异常时 `params` 为 `null`。日志端故障不影响消息状态转换。
 
@@ -56,10 +56,10 @@ final class ReportNotFound extends \RuntimeException implements ProvidesFailureC
 
 ## 安装与接入
 
-包名：`panda-men/think-queue-stream`。安装 v0.6 系列：
+包名：`panda-men/think-queue-stream`。安装 v0.7 系列：
 
 ```bash
-composer require panda-men/think-queue-stream:^0.6
+composer require panda-men/think-queue-stream:^0.7
 ```
 
 如果所用 Composer 仓库尚未收录该包，可在项目的 `composer.json` 添加 VCS 仓库，
@@ -90,10 +90,10 @@ ThinkPHP 的服务发现会注册 `ThinkQueue\Streams\Service` 并发布
 部署包含本变更的版本后、启动消费者前，在应用根目录执行：
 
 ```bash
-php think queue:manage install
+php think stream:manage install
 ```
 
-新安装使用该命令创建表。已有 v0.4 表在停止旧消费者、更新依赖后执行 `php think queue:manage upgrade`，
+新安装使用该命令创建表。已有 v0.4 表在停止旧消费者、更新依赖后执行 `php think stream:manage upgrade`，
 幂等补充新字段并将旧 BLOB 错误安全转为文本；项目需要改表名时先执行项目迁移，再执行 upgrade。
 升级会保留自定义主键、附加字段及历史；消费和查询不会自动执行 DDL。建表 SQL 位于
 `sql/mysql/failed_jobs.sql`、`sql/sqlite/failed_jobs.sql`，手动导入时将 `{{table}}` 替换为配置表名。
@@ -103,7 +103,7 @@ php think queue:manage install
 从 Redis 普通失败或隔离历史升级时，先停止所有旧版消费者，再建表、部署新版并按队列迁移：
 
 ```bash
-php think queue:manage migrate-failed --queue=exports --limit=1000
+php think stream:manage migrate-failed --queue=exports --limit=1000
 ```
 
 每次最多迁移指定数量，返回 `migrated`、`remaining`；重复执行直到 `remaining=0`。
@@ -279,7 +279,7 @@ final class ExportReport
 | `prefix` | `think-queue` | Redis 键名前缀，用于隔离项目和环境；仅允许字母、数字、冒号、下划线及连字符。 |
 | `queue` | `default` | 未显式指定队列时使用的队列名，允许通过入队参数或 `--queue` 选择其他队列。 |
 | `failed_connection` | `null` | 失败存储使用的应用数据库连接名称，null 使用 `database.default`；自动创建独立 PDO 连接。 |
-| `failed_table` | `failed_jobs` | 完整失败表名，不自动附加数据库表前缀；先通过 `queue:manage install` 创建。 |
+| `failed_table` | `failed_jobs` | 完整失败表名，不自动附加数据库表前缀；先通过 `stream:manage install` 创建。 |
 | `retry_after_ms` | `90000` | 待确认消息空闲多久后允许被接管，单位为**毫秒**。必须满足 `timeout * 1000 < retry_after_ms`；不是异常重试延迟，也不会自动续租。 |
 | `block_ms` | `1000` | 空闲阻塞读取的最长等待，单位为**毫秒**，范围 0 至 5000；0 表示不阻塞，CLI 空闲时仍会短暂休眠。 |
 | `claim_interval_ms` | `1000` | 检查超时待确认消息的间隔，单位为**毫秒**，必须大于 0；接管仍需满足 `retry_after_ms`。 |
@@ -300,48 +300,48 @@ final class ExportReport
 
 ```bash
 # 创建配置的失败记录表；部署时执行一次，不需要 Redis 可用。
-php think queue:manage install
+php think stream:manage install
 # 已有旧失败表显式升级，保留历史和项目附加字段。
-php think queue:manage upgrade
+php think stream:manage upgrade
 # 每次迁移最多 1000 条旧 Redis 普通失败和隔离历史，重复到 remaining=0。
-php think queue:manage migrate-failed --queue=exports --limit=1000
+php think stream:manage migrate-failed --queue=exports --limit=1000
 # 持续消费 exports 队列；最多领取 3 次，单次硬超时 60 秒，异常重试从 3 秒开始退避。
-php think queue:work --queue=exports --tries=3 --timeout=60 --delay=3
+php think stream:work --queue=exports --tries=3 --timeout=60 --delay=3
 # 只进行一次领取尝试，队列为空也退出；异常重投不增加延迟，本进程仍只领取一次。
-php think queue:work --queue=exports --once --delay=0
+php think stream:work --queue=exports --once --delay=0
 
 # 查看数据库中最多 100 条最终失败记录，输出包含 failure_id 和原始任务参数。
-php think queue:manage failed --queue=exports --limit=100
+php think stream:manage failed --queue=exports --limit=100
 # 重放指定失败记录：把示例 ID 替换为查询得到的 failure_id，不是业务 ID 或 job_id。
-php think queue:manage retry 1234567890000-0 --queue=exports
+php think stream:manage retry 1234567890000-0 --queue=exports
 # 删除指定失败记录；删除后不能再通过这条记录重放任务。
-php think queue:manage forget 1234567890000-0 --queue=exports
+php think stream:manage forget 1234567890000-0 --queue=exports
 # 更新当前 prefix 下所有队列消费者共享的重启标记；不会自动启动新的进程。
-php think queue:manage restart
+php think stream:manage restart
 
 # 输出任务计数、待确认任务和消费者心跳的 JSON 快照。
-php think queue:stats --queue=exports --json
+php think stream:stats --queue=exports --json
 # 查看心跳列表的下一页；分页不会改变队列消息，offset 是列表偏移量。
-php think queue:stats --queue=exports --json --limit=100 --offset=100
+php think stream:stats --queue=exports --json --limit=100 --offset=100
 # 查看被隔离的坏消息，修复生产者后再发布合法任务。
-php think queue:manage quarantined --queue=exports --limit=100
+php think stream:manage quarantined --queue=exports --limit=100
 # 删除指定隔离记录；使用查询返回的 quarantine_id。
-php think queue:manage forget-quarantine 1234567890000-0 --queue=exports
+php think stream:manage forget-quarantine 1234567890000-0 --queue=exports
 
 # 预览 7 天前的失败记录，每次最多 100 条；604800 的单位为秒，预览不会删除数据。
-php think queue:manage prune --queue=exports --kind=failed \
+php think stream:manage prune --queue=exports --kind=failed \
   --older-than=604800 --limit=100 --dry-run
 # 预览 30 天前的隔离记录；确认候选后去掉 --dry-run 才会实际删除。
-php think queue:manage prune --queue=exports --kind=quarantined \
+php think stream:manage prune --queue=exports --kind=quarantined \
   --older-than=2592000 --limit=100 --dry-run
 # 清理心跳至少 5 分钟未更新且没有 Pending 的消费者元数据；300000 的单位为毫秒。
 # 将名称替换为 stats 输出的真实消费者名称；不会强制结束进程或删除待执行任务。
-php think queue:manage cleanup-consumer '统计返回的消费者名称' --queue=exports --idle-ms=300000
+php think stream:manage cleanup-consumer '统计返回的消费者名称' --queue=exports --idle-ms=300000
 ```
 
 ### 多队列主进程与宝塔部署
 
-`queue:supervise` 在前台统一管理当前项目的多个 `queue:work` 子进程。每个 Worker
+`stream:supervise` 在前台统一管理当前项目的多个 `stream:work` 子进程。每个 Worker
 连续执行本队列的任务；新增 Job 类可以复用已有队列。每个子进程都用当前 `PHP_BINARY`
 重新执行应用根目录的 `think`，独立初始化应用及 Redis、数据库连接。
 
@@ -372,10 +372,10 @@ php think queue:manage cleanup-consumer '统计返回的消费者名称' --queue
 
 ```bash
 # 启动唯一主进程，自动启动配置中的全部 Worker。
-php think queue:supervise
+php think stream:supervise
 
 # 修改配置后，在另一个终端通知现有主进程重载；主进程 PID 保持不变。
-php think queue:supervise --reload
+php think stream:supervise --reload
 ```
 
 重载会从磁盘重新读取 `config/queue_streams.php`，完整校验成功后通知全部旧 Worker
@@ -387,7 +387,7 @@ php think queue:supervise --reload
 若配置文件有 PHP 语法错误，新启动的 ThinkPHP CLI 可能在执行 `--reload` 前就无法完成初始化；
 此时使用 `SIGHUP` 可验证主进程拒绝错误配置，或先修复文件再执行 `--reload`。
 
-Worker 达到任务数、内存、运行时间上限，收到已有 `queue:manage restart` 标记，
+Worker 达到任务数、内存、运行时间上限，收到已有 `stream:manage restart` 标记，
 或者发生硬超时、异常退出时，主进程都会自动补齐。首次等待 `restart_delay` 秒，
 连续异常退出按指数退避，最多 `restart_max_delay` 秒；正常退出或稳定运行至少 30 秒后重置退避。
 启动进程失败也会退避重试，不影响其他已运行的 Worker。
@@ -397,7 +397,7 @@ Worker 达到任务数、内存、运行时间上限，收到已有 `queue:manag
 ```ini
 [program:queue-streams]
 directory=/www/wwwroot/your-project
-command=/www/server/php/84/bin/php /www/wwwroot/your-project/think queue:supervise
+command=/www/server/php/84/bin/php /www/wwwroot/your-project/think stream:supervise
 user=www
 numprocs=1
 autostart=true
@@ -444,21 +444,21 @@ CLI 需要启用 `pcntl`，并允许 `proc_open`、`proc_get_status`、`proc_ter
 | `--max-time` | `3600` | 本进程最长运行时间，单位为秒，必须为正整数。 |
 
 内存、累计任务数和进程运行时间阈值在任务之间检查；当前任务的硬超时由 `timeout` 控制。
-消费者退出后需由进程管理器自动拉起，`queue:manage restart` 本身不负责拉起进程。
+消费者退出后需由进程管理器自动拉起，`stream:manage restart` 本身不负责拉起进程。
 
 ### 管理与统计参数
 
 | 参数 | 使用位置 | 中文说明 |
 | --- | --- | --- |
-| `--queue` | `queue:manage`、`queue:stats` | 操作指定队列，省略时使用默认队列；`restart` 使用共享前缀，不按此参数限制单个队列。 |
+| `--queue` | `stream:manage`、`stream:stats` | 操作指定队列，省略时使用默认队列；`restart` 使用共享前缀，不按此参数限制单个队列。 |
 | `--limit` | 查询、清理、统计 | 单次记录数或心跳分页条数，默认 100，范围 1 至 1000；不是待执行任务总数上限。 |
 | `--start` | `failed`、`quarantined` | 从指定 Stream ID 开始查询，默认 `-` 表示最早记录；用 `(ID` 排除上一页末条记录。 |
 | `--kind` | `prune` | 清理类型：`failed` 为失败记录，`quarantined` 为隔离记录，默认 `failed`。 |
 | `--older-than` | `prune` | 按记录 Stream ID 的创建时间筛选早于指定年龄的记录，单位为秒，必须显式提供正整数。 |
 | `--dry-run` | `prune` | 仅返回候选记录 ID，不执行删除；省略此参数会实际删除候选记录。 |
 | `--idle-ms` | `cleanup-consumer` | 最小心跳年龄，单位为毫秒，必须显式指定且不小于 `max(retry_after_ms, heartbeat_interval_ms * 2)`。 |
-| `--json` | `queue:stats` | 输出完整 JSON，包含心跳明细和首条 Pending 信息；不带此参数只输出主要计数。 |
-| `--offset` | `queue:stats` | 心跳列表分页偏移，默认 0，必须为非负整数；下一页可使用返回的 `next_offset`。 |
+| `--json` | `stream:stats` | 输出完整 JSON，包含心跳明细和首条 Pending 信息；不带此参数只输出主要计数。 |
+| `--offset` | `stream:stats` | 心跳列表分页偏移，默认 0，必须为非负整数；下一页可使用返回的 `next_offset`。 |
 
 失败记录查询为 JSON Lines，`failure_id` 是重放或删除命令所需的 Stream ID，
 `job_id` 是跨重投保持不变的任务 ID。重放成功后移除原失败记录，将同一 `job_id` 重新入队，
@@ -481,7 +481,7 @@ CLI 需要启用 `pcntl`，并允许 `proc_open`、`proc_get_status`、`proc_ter
 生产者，再用合法参数重新发布任务。`error` 为 MySQL LONGTEXT / SQLite TEXT，数据库中可直接查看原因。非法 UTF-8 用替代字符显示，
 原始字节分别保存在 `payload_base64`、`error_base64`；PHP 查询保留原始消息体，CLI 展示时替换非法字符。
 
-`queue:stats` 的 `active`、`waiting`、`pending`、`delayed`、`failed_pending`、
+`stream:stats` 的 `active`、`waiting`、`pending`、`delayed`、`failed_pending`、
 `quarantined_pending`、`first_pending`、`consumers` 等来自同一次 Lua 执行；`failed` 和 `quarantined` 单独查询数据库，
 因此跨存储计数不构成同一时点的原子快照。`waiting` 是本包单组、确认后删除
 约定下的 `ready_entries - pending`，不依赖 Redis 7 的 lag；`first_pending` 按消息 ID 排序，
@@ -565,10 +565,14 @@ Lua 使用 `EVALSHA`，只有明确的 `NOSCRIPT` 才加载并重发；连接超
 
 ## 与 topthink/think-queue 的差异
 
-这是采用独立命名空间的新实现，**不是完全兼容的原包替换**。使用时将 Facade 和 Job 的
-导入改为 `ThinkQueue\Streams\Facade\Queue`、`ThinkQueue\Streams\Job`。
-原包的 `CallQueuedHandler`、PHP 对象序列化、Database/Sync 驱动、原有 Redis List 数据和
-失败表不会自动迁移。不要在同一应用中同时注册两个包的 `queue:work` 命令。
+两个包可以安装在同一应用中。原包的命令使用 `queue:`，本包的命令使用 `stream:`。
+原包读取 `config/queue.php`，本包读取 `config/queue_streams.php`。
+如果原包也把失败任务存入数据库，请为本包配置独立的 `failed_table`，例如 `queue_streams_failed_jobs`。
+
+按业务迁移时，先启动对应的 Streams Worker，再将该批任务的生产者和处理器切到
+`ThinkQueue\Streams\Facade\Queue`、`ThinkQueue\Streams\Job`。旧 Worker 继续消费已经
+投递的任务，等待就绪、延迟和处理中任务全部处理完毕后再停。原包的 `CallQueuedHandler`、
+PHP 对象序列化、Database/Sync 驱动、Redis List 数据和失败历史需要按业务另行处理。
 
 只实现一个消费组的任务队列，不承诺严格执行顺序、恰好一次业务执行或广播语义。
 

@@ -25,11 +25,11 @@ return [
     // 未显式指定队列时使用的默认队列名；不是只允许消费这一个队列。
     'queue' => 'default',
 
-    // 多队列主进程配置；宝塔只需守护 php think queue:supervise，主进程保持前台运行。
+    // 多队列主进程配置；宝塔只需守护 php think stream:supervise，主进程保持前台运行。
     'supervisor' => [
         // 队列名称 => Worker 配置；空数组不启动 Worker，processes=0 可暂停指定队列。
         // 示例：'mail' => ['processes' => 2, 'tries' => 3, 'timeout' => 60, 'memory' => 128]。
-        // 可选参数：delay=3、max_jobs=1000、max_time=3600，与 queue:work 含义一致。
+        // 可选参数：delay=3、max_jobs=1000、max_time=3600，与 stream:work 含义一致。
         'workers' => [],
         // 所有队列 Worker 的总并发上限，包含重载时正在退出的旧 Worker。
         'max_processes' => 32,
@@ -42,7 +42,7 @@ return [
 
     // 最终失败记录使用的应用数据库连接名；null 沿用 database.default，使用独立 PDO 事务。
     'failed_connection' => null,
-    // 完整失败表名，不自动添加应用数据库表前缀；部署时执行 queue:manage install 创建。
+    // 完整失败表名，不自动添加应用数据库表前缀；部署时执行 stream:manage install 创建。
     'failed_table' => 'failed_jobs',
 
     // 待确认消息的接管等待时间，单位：毫秒；超过此空闲时间后，其他消费者可接管。
@@ -58,7 +58,7 @@ return [
     'promotion_interval_ms' => 1000,
     // 消费循环更新心跳的间隔，单位：毫秒，必须大于 0；执行长任务期间可能不更新。
     'heartbeat_interval_ms' => 10000,
-    // 检查 queue:manage restart 重启标记的间隔，单位：毫秒，必须大于 0。
+    // 检查 stream:manage restart 重启标记的间隔，单位：毫秒，必须大于 0。
     // 收到标记后等待当前任务结束再退出；需由 Supervisor/systemd 等进程管理器重新拉起。
     'restart_interval_ms' => 1000,
 

@@ -21,7 +21,7 @@ final class Manage extends Command
      */
     protected function configure(): void
     {
-        $this->setName('queue:manage')->setDescription('查看和维护失败、隔离记录及消费者')
+        $this->setName('stream:manage')->setDescription('查看和维护失败、隔离记录及消费者')
             ->addArgument('action', Argument::REQUIRED, 'install、upgrade、migrate-failed、failed、quarantined、retry、forget、forget-quarantine、prune、cleanup-consumer 或 restart')
             ->addArgument('id', Argument::OPTIONAL, '记录 Stream ID 或消费者名称')
             ->addOption('queue', null, Option::VALUE_REQUIRED, '队列名称')

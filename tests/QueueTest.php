@@ -399,6 +399,7 @@ final class QueueTest extends TestCase
         $output = stream_get_contents($pipes[1]);
         self::assertSame(0, $this->finishProcess($process, $pipes));
         $result = json_decode($output, true, 512, JSON_THROW_ON_ERROR);
+        self::assertSame([], $result['legacy_commands']);
         self::assertStringContainsString('claimed=1', $result['work_output']);
         self::assertSame('1', $result['record']['attempts']);
         self::assertSame(0, $result['failures_after_retry']);

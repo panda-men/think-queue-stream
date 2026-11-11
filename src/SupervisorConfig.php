@@ -34,7 +34,7 @@ final class SupervisorConfig
         return self::fromArray($config);
     }
 
-    /** 校验队列名称、并发预算和现有 queue:work 参数；空 workers 表示暂停全部消费。 */
+    /** 校验队列名称、并发预算和现有 stream:work 参数；空 workers 表示暂停全部消费。 */
     public static function fromArray(array $config): self
     {
         $config += ['supervisor' => [], 'retry_after_ms' => 90000];

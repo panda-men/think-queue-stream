@@ -1,5 +1,16 @@
 # 变更记录
 
+## 0.7.0 — 2026-11-11
+
+- 四个命令统一使用 `stream:` 命名空间，分别为 `stream:work`、`stream:supervise`、`stream:stats` 和 `stream:manage`。`queue:` 留给 `topthink/think-queue`，支持在同一 ThinkPHP 应用中逐批迁移任务。
+- `stream:supervise` 使用 `stream:work` 拉起子进程。命令参数、管理动作和队列数据格式沿用 0.6。
+
+### 从 0.6 升级
+
+- 停止现有 Streams 主进程或独立消费者，执行 `composer require panda-men/think-queue-stream:^0.7`。
+- 将进程管理器、部署脚本和应用内的 Streams 命令调用改为 `stream:`，再启动对应进程。宝塔守护入口改为 `php think stream:supervise`。
+- 沿用已有的 `config/queue_streams.php`、Redis 键前缀和失败表。新接入且与原包共存的项目应分别配置两个包的失败表。
+
 ## 0.6.0 — 2026-11-10
 
 - 新增 `queue:supervise` 前台主进程，以独立 PHP 子进程管理多个队列的 Worker，并按配置维持并发；宝塔只需守护一个主进程。

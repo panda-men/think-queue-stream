@@ -5,6 +5,8 @@ namespace ThinkQueue\Streams;
 
 use Closure;
 use RuntimeException;
+use ThinkQueue\Streams\Command\Supervise;
+use ThinkQueue\Streams\Command\Work;
 use Throwable;
 
 /** 前台运行的单项目主进程；Worker 使用全新 PHP 进程启动，不继承应用连接。 */
@@ -45,7 +47,7 @@ final class Supervisor
     public function run(): int
     {
         if (PHP_SAPI !== 'cli' || !extension_loaded('pcntl')) {
-            throw new RuntimeException('queue:supervise 要求 Linux/macOS CLI、pcntl 和 proc_open。');
+            throw new RuntimeException(Supervise::NAME . ' 要求 Linux/macOS CLI、pcntl 和 proc_open。');
         }
         foreach (['proc_open', 'proc_get_status', 'proc_terminate', 'proc_close',
             'pcntl_async_signals', 'pcntl_signal', 'pcntl_signal_get_handler', 'pcntl_alarm'] as $function) {
@@ -159,7 +161,7 @@ final class Supervisor
     /** 传入参数数组直接执行 PHP；标准输出直连主进程，由宝塔收集，避免日志管道积压。 */
     private function spawn(string $slot, array $spec, SupervisorConfig $config): void
     {
-        $command = [PHP_BINARY, $this->entryPoint, 'queue:work', '--queue=' . $spec['queue']];
+        $command = [PHP_BINARY, $this->entryPoint, Work::NAME, '--queue=' . $spec['queue']];
         foreach ($spec['options'] as $key => $value) {
             if ($key !== 'processes') $command[] = '--' . str_replace('_', '-', $key) . '=' . $value;
         }
@@ -202,7 +204,7 @@ final class Supervisor
         if ($handle === false) throw new RuntimeException('无法打开主进程 PID 文件。');
         if (!flock($handle, LOCK_EX | LOCK_NB)) {
             fclose($handle);
-            throw new RuntimeException('当前项目已有 queue:supervise 主进程运行。');
+            throw new RuntimeException('当前项目已有 ' . Supervise::NAME . ' 主进程运行。');
         }
         if (!ftruncate($handle, 0) || fwrite($handle, (string) getmypid() . "\n") === false || !fflush($handle)) {
             fclose($handle);

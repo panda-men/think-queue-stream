@@ -7,11 +7,11 @@ use think\App;
 use ThinkQueue\Streams\RedisConnection;
 use ThinkQueue\Streams\Service;
 
-// 由临时项目的 think 入口包含，使用真实 Console、Service 和 queue:work。
+// 由临时项目的 think 入口包含，使用真实 Console、Service 和 stream:work。
 $root = dirname($_SERVER['SCRIPT_FILENAME']);
-if (($argv[1] ?? '') === 'queue:work') {
+if (($argv[1] ?? '') === 'stream:work') {
     $modeFile = $root . '/worker-mode';
-    // 队列级故障注入只影响目标队列，其他队列仍启动真实 queue:work。
+    // 队列级故障注入只影响目标队列，其他队列仍启动真实 stream:work。
     foreach ($argv as $argument) {
         if (str_starts_with($argument, '--queue=')) {
             $queueModeFile = $root . '/worker-mode-' . substr($argument, strlen('--queue='));
@@ -35,7 +35,7 @@ $app->initialize();
 $service = new Service($app);
 $service->register();
 $service->boot();
-if (($argv[1] ?? '') === 'queue:work') {
+if (($argv[1] ?? '') === 'stream:work') {
     $app->instance(Redis::class, RedisConnection::connect($app->config->get('queue_streams')));
     if (($mode ?? '') === 'stop-before-claim') {
         $app->event->listen(\ThinkQueue\Streams\Event\Looping::class, static function () use ($root): void {

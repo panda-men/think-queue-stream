@@ -233,7 +233,7 @@ final class SupervisorTest extends TestCase
         $this->until(fn (): bool => str_contains($this->processLog($master), '[主进程启动]'));
         $duplicate = $this->start();
         $this->waitExit($duplicate);
-        self::assertStringContainsString('已有 queue:supervise 主进程运行', $this->processLog($duplicate));
+        self::assertStringContainsString('已有 stream:supervise 主进程运行', $this->processLog($duplicate));
         $this->stop($master);
         $replacement = $this->start();
         $this->until(fn (): bool => str_contains($this->processLog($replacement), '[主进程启动]'));
@@ -399,7 +399,7 @@ final class SupervisorTest extends TestCase
     {
         $index = count($this->processes);
         $log = $this->root . '/process-' . $index . '.log';
-        $handle = proc_open([PHP_BINARY, ...$phpOptions, $this->root . '/think', 'queue:supervise', ...$arguments],
+        $handle = proc_open([PHP_BINARY, ...$phpOptions, $this->root . '/think', 'stream:supervise', ...$arguments],
             [0 => ['file', '/dev/null', 'r'], 1 => ['file', $log, 'a'], 2 => ['file', $log, 'a']], $pipes, $this->root);
         self::assertIsResource($handle);
         $this->processes[$index] = ['handle' => $handle, 'log' => $log];

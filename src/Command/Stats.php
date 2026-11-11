@@ -14,7 +14,7 @@ final class Stats extends Command
 {
     protected function configure(): void
     {
-        $this->setName('queue:stats')->setDescription('查看任务、Pending 和消费者心跳快照')
+        $this->setName('stream:stats')->setDescription('查看任务、Pending 和消费者心跳快照')
             ->addOption('queue', null, Option::VALUE_REQUIRED, '队列名称')
             ->addOption('json', null, Option::VALUE_NONE, '输出 JSON')
             ->addOption('limit', null, Option::VALUE_REQUIRED, '心跳分页数量，最多 1000', 100)
